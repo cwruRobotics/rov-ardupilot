@@ -20,7 +20,7 @@ uint16_t buttons_prev;
 
 // Servo control output channels
 // TODO: Allow selecting output channels
-const uint8_t SERVO_CHAN_1 = 9; // Pixhawk Aux1
+const uint8_t SERVO_CHAN_1 = 9; // Pixhawk Aux1    # uwu servo_chan
 const uint8_t SERVO_CHAN_2 = 10; // Pixhawk Aux2
 const uint8_t SERVO_CHAN_3 = 11; // Pixhawk Aux3
 
