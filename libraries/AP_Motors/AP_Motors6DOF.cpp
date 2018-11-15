@@ -171,9 +171,13 @@ void AP_Motors6DOF::setup_motors(motor_frame_class frame_class, motor_frame_type
         add_motor_raw_6dof(AP_MOTORS_MOT_6,     -1.0f,          0,              0,              -1.0f,              0,                  0,              6);
         break;
 
+    //TODO use the actual numbers
     case SUB_FRAME_CUSTOM:
-        // Put your custom motor setup here
-        //break;
+        add_motor_raw_6dof(AP_MOTORS_MOT_1,     0.5f,           0.5f,           0.5f,           0,                  1.0f,               0,             1);
+        add_motor_raw_6dof(AP_MOTORS_MOT_2,     0,              0,              1.0f,           0,                  1.0f,               0,             2);
+        add_motor_raw_6dof(AP_MOTORS_MOT_3,     -0.5f,          0.5f,           0,              0.45f,              0,                  0,             3);
+        add_motor_raw_6dof(AP_MOTORS_MOT_4,     -0.5f,          0.5f,           0,              0.45f,              0,                  0,             4);
+        break;
 
     case SUB_FRAME_SIMPLEROV_3:
     case SUB_FRAME_SIMPLEROV_4:
@@ -540,6 +544,7 @@ void AP_Motors6DOF::output_armed_stabilizing_vectored_6dof()
     // Calculate final output for each motor and normalize if necessary
     for (i=0; i<AP_MOTORS_MAX_NUM_MOTORS; i++) {
         if (motor_enabled[i]) {
+            //can change to (-1.0, 0.8) if necessary to compensate for forward being stronger
             _thrust_rpyt_out[i] = constrain_float(_motor_reverse[i]*(rpt_out[i]/rpt_max + yfl_out[i]/yfl_max),-1.0f,1.0f);
         }
     }
