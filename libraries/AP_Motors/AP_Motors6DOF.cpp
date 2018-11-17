@@ -545,6 +545,8 @@ void AP_Motors6DOF::output_armed_stabilizing_vectored_6dof()
     for (i=0; i<AP_MOTORS_MAX_NUM_MOTORS; i++) {
         if (motor_enabled[i]) {
             //can change to (-1.0, 0.8) if necessary to compensate for forward being stronger
+            //Note: I'm not totally sure how the reversing is handled. We may need to set the limts for each
+            //thruster individually based on whether it is a CW or CCW propeller.
             _thrust_rpyt_out[i] = constrain_float(_motor_reverse[i]*(rpt_out[i]/rpt_max + yfl_out[i]/yfl_max),-1.0f,1.0f);
         }
     }

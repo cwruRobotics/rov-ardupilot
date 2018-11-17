@@ -296,3 +296,12 @@
 #ifndef AC_TERRAIN
 #define AC_TERRAIN DISABLED // Requires Rally enabled as well
 #endif
+
+//thrust limits
+#ifndef FWD_THRUST_LIMIT
+#define FWD_THRUST_LIMIT 0.8f
+#endif
+
+#ifndef REV_THRUST_LIMIT
+#define REV_THRUST_LIMIT -1.0f
+#endif

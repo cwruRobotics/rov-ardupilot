@@ -296,6 +296,20 @@ const AP_Param::Info Sub::var_info[] = {
     // @Values: 0:BlueROV1, 1:Vectored, 2:Vectored_6DOF, 3:Vectored_6DOF_90, 4:SimpleROV-3, 5:SimpleROV-4, 6:SimpleROV-5, 7:Custom
     GSCALAR(frame_configuration, "FRAME_CONFIG", AP_Motors6DOF::SUB_FRAME_VECTORED),
 
+    // @Param: FWD_THRUST_LIMIT
+    // @DisplayName: Forward thrust limit
+    // @Description: Scaling factor to compensate for thrusters being stronger in one direction 
+    // @User: Standard
+    // @Range: -1.0 1.0
+    GSCALAR(fwd_thrust_limit, "FWD_THRUST_LIMIT", 0.8f),
+
+    // @Param: REV_THRUST_LIMIT
+    // @DisplayName: Reverse thrust limit
+    // @Description: Scaling factor to compensate for thrusters being stronger in one direction 
+    // @User: Standard
+    // @Range: -1.0 1.0
+    GSCALAR(rev_thrust_limit, "REV_THRUST_LIMIT", -1.0f),
+
     // @Group: BTN0_
     // @Path: ../libraries/AP_JSButton/AP_JSButton.cpp
     GGROUP(jbtn_0,                   "BTN0_", JSButton),

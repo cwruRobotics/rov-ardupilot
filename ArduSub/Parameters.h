@@ -187,6 +187,8 @@ public:
         k_param_throttle_gain,
         k_param_cam_tilt_center, // deprecated
         k_param_frame_configuration,
+        k_param_fwd_thrust_limit,   // generally should equal (max rev thrust)/(max fwd thrust) for CW thruster
+        k_param_rev_thrust_limit,   // generally should be -1 for CW thruster
 
         // Acro Mode parameters
         k_param_acro_yaw_p = 220, // Used in all modes for get_pilot_desired_yaw_rate
@@ -299,6 +301,9 @@ public:
 
     AP_Float                surface_depth;
     AP_Int8                 frame_configuration;
+
+    AP_Float                fwd_thrust_limit;
+    AP_Float                rev_thrust_limit;
 
     // Note: keep initializers here in the same order as they are declared
     // above.
