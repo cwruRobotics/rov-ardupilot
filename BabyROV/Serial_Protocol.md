@@ -1,4 +1,4 @@
-# UART Protocol
+# Serial Protocol
 
 # Raspberry Pi <-> Arduino
 
@@ -9,7 +9,7 @@
 |**Master** *(RPi)*|[OP Code](#op-codes)|[CRC](#crc)|NOP|[Data Packet](#data-packet) Byte 1|...|[Data Packet](#data-packet) Byte N|[CRC](#crc)|NOP|NOP| 
 |**Slave** *(Arduino)*|NOP|NOP|[ACK/ERR](#ack-err)|NOP|...|NOP|NOP|[ACK/ERR](#ack-err)|[DONE/ERR](#done-err)|
 
-To further explain what would happen for a UART transmission, suppose the master sent some [OP Code](#op-codes) (byte 1) along with a [CRC](#crc) (byte 2) calculated over the OP Code byte.
+To further explain what would happen for a serial transmission, suppose the master sent some [OP Code](#op-codes) (byte 1) along with a [CRC](#crc) (byte 2) calculated over the OP Code byte.
 
 The slave would then send back an acknowlegement ([ACK/ERR](#ack-err) in byte 3) that it received the command if the [OP Code](#op-codes) is valid and the [CRC](#crc) matches (`0xFF` on success, `0x00` on failure).  If the [OP Code](#op-codes) does not have a [data packet](#data-packet) associated with it, the [data packet](#data-packet) part of the transmission is skipped and the master waits for the slave to respond with [DONE/ERR](#done-err) (bytes 4 through N + 6 are skipped and byte 4 becomes the DONE/ERR in byte N + 7)
 
