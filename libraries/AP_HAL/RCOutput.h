@@ -51,6 +51,13 @@ public:
     virtual void     write(uint8_t chan, uint16_t period_us) = 0;
 
     /*
+     * mark the channels in chanmask as reversible. This is needed for some ESC types (such as DShot)
+     * so that output scaling can be performed correctly. The chanmask passed is added (ORed) into
+     * any existing mask.
+     */
+    virtual void     set_reversible_mask(uint16_t chanmask) {}
+    
+    /*
      * Delay subsequent calls to write() going to the underlying hardware in
      * order to group related writes together. When all the needed writes are
      * done, call push() to commit the changes.
@@ -96,11 +103,6 @@ public:
       force the safety switch off, enabling PWM output from the IO board
      */
     virtual void     force_safety_off(void) {}
-
-    /*
-      If we support async sends (px4), this will force it to be serviced immediately
-     */
-    virtual void     force_safety_no_wait(void) {}
 
     /*
       setup scaling of ESC output for ESCs that can output a
@@ -176,6 +178,7 @@ public:
         MODE_PWM_DSHOT300,
         MODE_PWM_DSHOT600,
         MODE_PWM_DSHOT1200,
+        MODE_NEOPIXEL,      // same as MODE_PWM_DSHOT at 800kHz but it's an LED
     };
     virtual void    set_output_mode(uint16_t mask, enum output_mode mode) {}
 
@@ -189,4 +192,21 @@ public:
       with DShot to get telemetry feedback
      */
     virtual void set_telem_request_mask(uint16_t mask) {}
+
+    /*
+      setup neopixel (WS2812B) output for a given channel number, with
+      the given max number of LEDs in the chain.
+     */
+    virtual bool set_neopixel_num_LEDs(const uint16_t chan, uint8_t num_leds) { return false; }
+
+    /*
+      setup neopixel (WS2812B) output data for a given output channel
+      and mask of which LEDs in the chain
+     */
+    virtual void set_neopixel_rgb_data(const uint16_t chan, uint32_t ledmask, uint8_t red, uint8_t green, uint8_t blue) {}
+
+    /*
+      trigger send of neopixel data
+     */
+    virtual void neopixel_send(void) {}
 };

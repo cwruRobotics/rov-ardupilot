@@ -4,7 +4,9 @@
 from __future__ import print_function
 
 import os.path
+import os
 import sys
+import subprocess
 sys.path.insert(0, 'Tools/ardupilotwaf/')
 
 import ardupilotwaf
@@ -26,27 +28,34 @@ from waflib import Build, ConfigSet, Configure, Context, Utils
 # Default installation prefix for Linux boards
 default_prefix = '/usr/'
 
-def _set_build_context_variant(variant):
+# Override Build execute and Configure post_recurse methods for autoconfigure purposes
+Build.BuildContext.execute = ardupilotwaf.ap_autoconfigure(Build.BuildContext.execute)
+Configure.ConfigurationContext.post_recurse = ardupilotwaf.ap_configure_post_recurse()
+
+
+def _set_build_context_variant(board):
     for c in Context.classes:
         if not issubclass(c, Build.BuildContext):
             continue
-        c.variant = variant
+        c.variant = board
 
 def init(ctx):
     env = ConfigSet.ConfigSet()
     try:
         p = os.path.join(Context.out_dir, Build.CACHE_DIR, Build.CACHE_SUFFIX)
         env.load(p)
-    except:
+    except EnvironmentError:
         return
 
     Configure.autoconfig = 'clobber' if env.AUTOCONFIG else False
 
-    if 'VARIANT' not in env:
+    board = ctx.options.board or env.BOARD
+
+    if not board:
         return
 
     # define the variant build commands according to the board
-    _set_build_context_variant(env.VARIANT)
+    _set_build_context_variant(board)
 
 def options(opt):
     opt.load('compiler_cxx compiler_c waf_unit_test python')
@@ -56,27 +65,32 @@ def options(opt):
     g = opt.ap_groups['configure']
 
     boards_names = boards.get_boards_names()
+    removed_names = boards.get_removed_boards()
     g.add_option('--board',
         action='store',
-        choices=boards_names,
-        default='sitl',
-        help='Target board to build, choices are %s.' % boards_names)
+        default=None,
+        help='Target board to build, choices are %s.' % ', '.join(boards_names))
 
     g.add_option('--debug',
         action='store_true',
         default=False,
         help='Configure as debug variant.')
 
+    g.add_option('--toolchain',
+        action='store',
+        default=None,
+        help='Override default toolchain used for the board. Use "native" for using the host toolchain.')
+
+    g.add_option('--disable-gccdeps',
+        action='store_true',
+        default=False,
+        help='Disable the use of GCC dependencies output method and use waf default method.')
+
     g.add_option('--enable-asserts',
         action='store_true',
         default=False,
         help='enable OS level asserts.')
 
-    g.add_option('--use-nuttx-iofw',
-        action='store_true',
-        default=False,
-        help='use old NuttX IO firmware for IOMCU')
-    
     g.add_option('--bootloader',
         action='store_true',
         default=False,
@@ -111,6 +125,14 @@ submodules at specific revisions.
                  action='store_true',
                  default=False,
                  help="Enable checking of math indexes")
+
+    g.add_option('--disable-scripting', action='store_true',
+                 default=False,
+                 help="Disable onboard scripting engine")
+
+    g.add_option('--scripting-checks', action='store_true',
+                 default=True,
+                 help="Enable runtime scripting sanity checks")
 
     g = opt.ap_groups['linux']
 
@@ -157,10 +179,27 @@ configuration in order to save typing.
                  default=False,
                  help="Enable SFML graphics library")
 
-    g.add_option('--enable-scripting', action='store_true',
+    g.add_option('--enable-sfml-audio', action='store_true',
                  default=False,
-                 help="Enable onboard scripting engine")
+                 help="Enable SFML audio library")
 
+    g.add_option('--sitl-osd', action='store_true',
+                 default=False,
+                 help="Enable SITL OSD")
+
+    g.add_option('--sitl-rgbled', action='store_true',
+                 default=False,
+                 help="Enable SITL RGBLed")
+
+    g.add_option('--build-dates', action='store_true',
+                 default=False,
+                 help="Include build date in binaries.  Appears in AUTOPILOT_VERSION.os_sw_version")
+
+    g.add_option('--sitl-flash-storage',
+        action='store_true',
+        default=False,
+        help='Configure for building SITL with flash storage emulation.')
+    
     g.add_option('--static',
         action='store_true',
         default=False,
@@ -185,20 +224,30 @@ def _collect_autoconfig_files(cfg):
                 cfg.files.append(p)
 
 def configure(cfg):
+	# we need to enable debug mode when building for gconv, and force it to sitl
+    if cfg.options.board is None:
+        cfg.options.board = 'sitl'
+
+    boards_names = boards.get_boards_names()
+    if not cfg.options.board in boards_names:
+        for b in boards_names:
+            if b.upper() == cfg.options.board.upper():
+                cfg.options.board = b
+                break
+        
     cfg.env.BOARD = cfg.options.board
     cfg.env.DEBUG = cfg.options.debug
     cfg.env.AUTOCONFIG = cfg.options.autoconfig
 
-    cfg.env.VARIANT = cfg.env.BOARD
-
-    _set_build_context_variant(cfg.env.VARIANT)
-    cfg.setenv(cfg.env.VARIANT)
+    _set_build_context_variant(cfg.env.BOARD)
+    cfg.setenv(cfg.env.BOARD)
 
     cfg.env.BOARD = cfg.options.board
     cfg.env.DEBUG = cfg.options.debug
     cfg.env.ENABLE_ASSERTS = cfg.options.enable_asserts
     cfg.env.BOOTLOADER = cfg.options.bootloader
-    cfg.env.USE_NUTTX_IOFW = cfg.options.use_nuttx_iofw
+
+    cfg.env.OPTIONS = cfg.options.__dict__
 
     # Allow to differentiate our build from the make build
     cfg.define('WAF_BUILD', 1)
@@ -250,7 +299,13 @@ def configure(cfg):
         cfg.end_msg('disabled', color='YELLOW')
 
     cfg.start_msg('Scripting')
-    if cfg.options.enable_scripting:
+    if cfg.options.disable_scripting:
+        cfg.end_msg('disabled', color='YELLOW')
+    else:
+        cfg.end_msg('enabled')
+
+    cfg.start_msg('Scripting runtime checks')
+    if cfg.options.scripting_checks:
         cfg.end_msg('enabled')
     else:
         cfg.end_msg('disabled', color='YELLOW')
@@ -310,7 +365,7 @@ def board(ctx):
         print('No board currently configured')
         return
 
-    print('Board configured to: {}'.format(env.VARIANT))
+    print('Board configured to: {}'.format(env.BOARD))
 
 def _build_cmd_tweaks(bld):
     if bld.cmd == 'check-all':
@@ -340,7 +395,7 @@ def _build_dynamic_sources(bld):
     if bld.get_board().with_uavcan or bld.env.HAL_WITH_UAVCAN==True:
         bld(
             features='uavcangen',
-            source=bld.srcnode.ant_glob('modules/uavcan/dsdl/uavcan/**/*.uavcan'),
+            source=bld.srcnode.ant_glob('modules/uavcan/dsdl/* libraries/AP_UAVCAN/dsdl/*', dir=True, src=False),
             output_dir='modules/uavcan/libuavcan/include/dsdlc_generated',
             name='uavcan',
             export_includes=[
@@ -414,6 +469,11 @@ def _build_recursion(bld):
     if bld.env.IOMCU_FW is not None:
         if bld.env.IOMCU_FW:
             dirs_to_recurse.append('libraries/AP_IOMCU/iofirmware')
+
+    if bld.env.PERIPH_FW is not None:
+        if bld.env.PERIPH_FW:
+            dirs_to_recurse.append('Tools/AP_Periph')
+
     for p in hal_dirs_patterns:
         dirs_to_recurse += collect_dirs_to_recurse(
             bld,
@@ -437,7 +497,7 @@ def _build_post_funs(bld):
     if bld.env.SUBMODULE_UPDATE:
         bld.git_submodule_post_fun()
 
-def load_pre_build(bld):
+def _load_pre_build(bld):
     '''allow for a pre_build() function in build modules'''
     brd = bld.get_board()
     if getattr(brd, 'pre_build', None):
@@ -457,7 +517,7 @@ def build(bld):
         cxxflags=['-include', 'ap_config.h'],
     )
 
-    load_pre_build(bld)
+    _load_pre_build(bld)
 
     if bld.get_board().with_uavcan:
         bld.env.AP_LIBRARIES_OBJECTS_KW['use'] += ['uavcan']
@@ -489,7 +549,7 @@ ardupilotwaf.build_command('check-all',
     doc='shortcut for `waf check --alltests`',
 )
 
-for name in ('antennatracker', 'copter', 'heli', 'plane', 'rover', 'sub', 'bootloader','iofirmware'):
+for name in ('antennatracker', 'copter', 'heli', 'plane', 'rover', 'sub', 'bootloader','iofirmware','AP_Periph'):
     ardupilotwaf.build_command(name,
         program_group_list=name,
         doc='builds %s programs' % name,

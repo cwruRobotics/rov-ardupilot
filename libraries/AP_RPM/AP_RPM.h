@@ -38,7 +38,7 @@ public:
     // RPM driver types
     enum RPM_Type {
         RPM_TYPE_NONE    = 0,
-        RPM_TYPE_PX4_PWM = 1,
+        RPM_TYPE_PWM     = 1,
         RPM_TYPE_PIN     = 2
     };
 
@@ -92,11 +92,18 @@ public:
 
     bool enabled(uint8_t instance) const;
 
+    static AP_RPM *get_singleton() { return _singleton; }
+
 private:
+    static AP_RPM *_singleton;
+
     RPM_State state[RPM_MAX_INSTANCES];
     AP_RPM_Backend *drivers[RPM_MAX_INSTANCES];
     uint8_t num_instances:2;
 
     void detect_instance(uint8_t instance);
-    void update_instance(uint8_t instance);
+};
+
+namespace AP {
+    AP_RPM *rpm();
 };

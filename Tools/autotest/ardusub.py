@@ -4,107 +4,152 @@
 from __future__ import print_function
 import os
 
-import pexpect
 from pymavlink import mavutil
-
-from pysim import util
 
 from common import AutoTest
 from common import NotAchievedException
 
 # get location of scripts
 testdir = os.path.dirname(os.path.realpath(__file__))
-HOME = mavutil.location(33.810313, -118.393867, 0, 185)
+
+SITL_START_LOCATION = mavutil.location(33.810313, -118.393867, 0, 185)
+
+
+class Joystick():
+    Pitch = 1
+    Roll = 2
+    Throttle = 3
+    Yaw = 4
+    Forward = 5
+    Lateral = 6
 
 
 class AutoTestSub(AutoTest):
-    def __init__(self,
-                 binary,
-                 valgrind=False,
-                 gdb=False,
-                 speedup=10,
-                 frame=None,
-                 params=None,
-                 gdbserver=False,
-                 breakpoints=[],
-                 **kwargs):
-        super(AutoTestSub, self).__init__(**kwargs)
-        self.binary = binary
-        self.valgrind = valgrind
-        self.gdb = gdb
-        self.frame = frame
-        self.params = params
-        self.gdbserver = gdbserver
-        self.breakpoints = breakpoints
+    @staticmethod
+    def get_not_armable_mode_list():
+        return []
 
-        self.home = "%f,%f,%u,%u" % (HOME.lat,
-                                     HOME.lng,
-                                     HOME.alt,
-                                     HOME.heading)
-        self.homeloc = None
-        self.speedup = speedup
+    @staticmethod
+    def get_not_disarmed_settable_modes_list():
+        return []
 
-        self.sitl = None
-        self.hasInit = False
+    @staticmethod
+    def get_no_position_not_settable_modes_list():
+        return ["AUTO", "GUIDED", "CIRCLE", "POSHOLD"]
 
-        self.log_name = "ArduSub"
+    @staticmethod
+    def get_position_armable_modes_list():
+        return []
+
+    @staticmethod
+    def get_normal_armable_modes_list():
+        return ["ACRO", "ALT_HOLD", "MANUAL", "STABILIZE", "SURFACE"]
+
+    def log_name(self):
+        return "ArduSub"
+
+    def test_filepath(self):
+         return os.path.realpath(__file__)
+
+    def default_mode(self):
+        return 'MANUAL'
+
+    def sitl_start_location(self):
+        return SITL_START_LOCATION
+
+    def default_frame(self):
+        return 'vectored'
 
     def init(self):
-        if self.frame is None:
-            self.frame = 'vectored'
+        super(AutoTestSub, self).init()
 
-        self.sitl = util.start_SITL(self.binary,
-                                    model=self.frame,
-                                    home=self.home,
-                                    speedup=self.speedup,
-                                    valgrind=self.valgrind,
-                                    gdb=self.gdb,
-                                    gdbserver=self.gdbserver,
-                                    breakpoints=self.breakpoints,
-                                    wipe=True)
-        self.mavproxy = util.start_MAVProxy_SITL(
-            'ArduSub', options=self.mavproxy_options())
-        self.mavproxy.expect('Telemetry log: (\S+)\r\n')
-        self.logfile = self.mavproxy.match.group(1)
-        self.progress("LOGFILE %s" % self.logfile)
-        self.try_symlink_tlog()
+        # FIXME:
+        self.set_parameter("FS_GCS_ENABLE", 0)
 
-        self.progress("WAITING FOR PARAMETERS")
-        self.mavproxy.expect('Received [0-9]+ parameters')
+    def is_sub(self):
+        return True
 
-        util.expect_setup_callback(self.mavproxy, self.expect_callback)
+    def arming_test_mission(self):
+        return os.path.join(testdir, "ArduSub-Missions", "test_arming.txt")
 
-        self.expect_list_clear()
-        self.expect_list_extend([self.sitl, self.mavproxy])
+    def watch_altitude_maintained(self, delta=0.5, timeout=5.0):
+        """Watch and wait for the actual altitude to be maintained
 
-        self.progress("Started simulator")
+        Keyword Arguments:
+            delta {float} -- Maximum altitude range to be allowed from actual point (default: {0.5})
+            timeout {float} -- Timeout time in simulation seconds (default: {5.0})
 
-        self.get_mavlink_connection_going()
+        Raises:
+            NotAchievedException: Exception when altitude fails to hold inside the time and
+                altitude range
+        """
+        tstart = self.get_sim_time_cached()
+        previous_altitude = self.mav.recv_match(type='VFR_HUD', blocking=True).alt
+        self.progress('Altitude to be watched: %f' % (previous_altitude))
+        while True:
+            m = self.mav.recv_match(type='VFR_HUD', blocking=True)
+            if self.get_sim_time_cached() - tstart > timeout:
+                self.progress('Altitude hold done: %f' % (previous_altitude))
+                return
+            if abs(m.alt - previous_altitude) > delta:
+                raise NotAchievedException("Altitude not maintained: want %.2f (~%.2f) got=%.2f" % (m, delta, m.alt))
 
-        self.hasInit = True
+    def test_alt_hold(self):
+        """Test ALT_HOLD mode
+        """
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
+        self.mavproxy.send('mode ALT_HOLD\n')
+        self.wait_mode('ALT_HOLD')
 
-        self.apply_defaultfile_parameters()
 
-        self.progress("Ready to start testing!")
+        self.set_rc(Joystick.Throttle, 1000)
+        self.wait_altitude(alt_min=-6, alt_max=-5)
+        self.set_rc(Joystick.Throttle, 1500)
+
+        self.watch_altitude_maintained()
+
+        self.set_rc(Joystick.Throttle, 1000)
+        self.wait_altitude(alt_min=-20, alt_max=-19)
+        self.set_rc(Joystick.Throttle, 1500)
+
+        self.watch_altitude_maintained()
+
+        self.set_rc(Joystick.Throttle, 1900)
+        self.wait_altitude(alt_min=-14, alt_max=-13)
+        self.set_rc(Joystick.Throttle, 1500)
+
+        self.watch_altitude_maintained()
+
+        self.set_rc(Joystick.Throttle, 1900)
+        self.wait_altitude(alt_min=-5, alt_max=-4)
+        self.set_rc(Joystick.Throttle, 1500)
+
+        self.watch_altitude_maintained()
+
+        self.disarm_vehicle()
 
     def dive_manual(self):
-        self.set_rc(3, 1600)
-        self.set_rc(5, 1600)
-        self.set_rc(6, 1550)
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
+
+        self.set_rc(Joystick.Throttle, 1600)
+        self.set_rc(Joystick.Forward, 1600)
+        self.set_rc(Joystick.Lateral, 1550)
 
         self.wait_distance(50, accuracy=7, timeout=200)
-        self.set_rc(4, 1550)
+        self.set_rc(Joystick.Yaw, 1550)
 
         self.wait_heading(0)
-        self.set_rc(4, 1500)
+        self.set_rc(Joystick.Yaw, 1500)
 
         self.wait_distance(50, accuracy=7, timeout=100)
-        self.set_rc(4, 1550)
+        self.set_rc(Joystick.Yaw, 1550)
 
         self.wait_heading(0)
-        self.set_rc(4, 1500)
-        self.set_rc(5, 1500)
-        self.set_rc(6, 1100)
+        self.set_rc(Joystick.Yaw, 1500)
+        self.set_rc(Joystick.Forward, 1500)
+        self.set_rc(Joystick.Lateral, 1100)
 
         self.wait_distance(75, accuracy=7, timeout=100)
         self.set_rc_default()
@@ -114,10 +159,7 @@ class AutoTestSub(AutoTest):
 
     def dive_mission(self, filename):
         self.progress("Executing mission %s" % filename)
-        self.mavproxy.send('wp load %s\n' % filename)
-        self.mavproxy.expect('Flight plan received')
-        self.mavproxy.send('wp list\n')
-        self.mavproxy.expect('Saved [0-9]+ waypoints')
+        self.load_mission(filename)
         self.set_rc_default()
 
         self.arm_vehicle()
@@ -141,9 +183,7 @@ class AutoTestSub(AutoTest):
                 self.progress("Skipping; Gripper not enabled in config?")
                 return
 
-            self.mavproxy.send('wp load %s\n' %
-                               os.path.join(testdir,
-                                            "sub-gripper-mission.txt"))
+            self.load_mission("sub-gripper-mission.txt")
             self.mavproxy.send('mode loiter\n')
             self.wait_ready_to_arm()
             self.arm_vehicle()
@@ -158,54 +198,91 @@ class AutoTestSub(AutoTest):
         if ex is not None:
             raise ex
 
-    def autotest(self):
-        """Autotest ArduSub in SITL."""
-        self.check_test_syntax(test_file=os.path.realpath(__file__))
-        if not self.hasInit:
-            self.init()
+    def dive_set_position_target(self):
+        self.change_mode('GUIDED')
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
 
-        self.fail_list = []
-        try:
-            self.progress("Waiting for a heartbeat with mavlink protocol %s"
-                          % self.mav.WIRE_PROTOCOL_VERSION)
-            self.mav.wait_heartbeat()
-            self.set_parameter("FS_GCS_ENABLE", 0)
-            self.progress("Waiting for GPS fix")
-            self.mav.wait_gps_fix()
+        startpos = self.mav.recv_match(type='GLOBAL_POSITION_INT',
+                                       blocking=True)
 
-            # wait for EKF and GPS checks to pass
-            self.progress("Waiting for ready-to-arm")
-            self.wait_ready_to_arm()
-            self.run_test("Arm features", self.test_arm_feature)
-            self.arm_vehicle()
+        lat = 5
+        lon = 5
+        alt = 10
 
-            self.homeloc = self.mav.location()
-            self.progress("Home location: %s" % self.homeloc)
-            self.set_rc_default()
+        tstart = self.get_sim_time()
+        while True:
+            if self.get_sim_time_cached() - tstart > 200:
+                raise NotAchievedException("Did not move far enough")
+            # send a position-control command
+            self.mav.mav.set_position_target_global_int_send(
+                0, # timestamp
+                1, # target system_id
+                1, # target component id
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                0b1111111111111000, # mask specifying use-only-lat-lon-alt
+                lat, # lat
+                lon, # lon
+                alt, # alt
+                0, # vx
+                0, # vy
+                0, # vz
+                0, # afx
+                0, # afy
+                0, # afz
+                0, # yaw
+                0, # yawrate
+            )
+            pos = self.mav.recv_match(type='GLOBAL_POSITION_INT',
+                                      blocking=True)
+            delta = self.get_distance_int(startpos, pos)
+            self.progress("delta=%f (want >10)" % delta)
+            if delta > 10:
+                break
+        self.change_mode('MANUAL')
+        self.disarm_vehicle()
 
-            self.run_test("Arm vehicle", self.arm_vehicle)
+    def reboot_sitl(self):
+        """Reboot SITL instance and wait it to reconnect."""
+        self.mavproxy.send("reboot\n")
+        self.mavproxy.expect("Init ArduSub")
+        # empty mav to avoid getting old timestamps:
+        while self.mav.recv_match(blocking=False):
+            pass
+        self.initialise_after_reboot_sitl()
 
-            self.run_test("Dive manual", self.dive_manual)
+    def disabled_tests(self):
+        ret = super(AutoTestSub, self).disabled_tests()
+        ret.update({
+            "ConfigErrorLoop": "Sub does not instantiate AP_Stats.  Also see https://github.com/ArduPilot/ardupilot/issues/10247",
+        })
+        return ret
 
-            self.run_test("Dive mission",
-                          lambda: self.dive_mission(
-                              os.path.join(testdir, "sub_mission.txt")))
+    def tests(self):
+        '''return list of all tests'''
+        ret = super(AutoTestSub, self).tests()
 
-            self.run_test("Test gripper mission items",
-                          self.test_gripper_mission);
+        ret.extend([
+            ("DiveManual", "Dive manual", self.dive_manual),
 
-            self.run_test("Log download",
-                          lambda: self.log_download(
-                              self.buildlogs_path("ArduSub-log.bin"),
-                              upload_logs=len(self.fail_list)>0))
+            ("AltitudeHold", "Test altitude holde mode", self.test_alt_hold),
 
-        except pexpect.TIMEOUT:
-            self.progress("Failed with timeout")
-            self.fail_list.append("Failed with timeout")
+            ("DiveMission",
+             "Dive mission",
+             lambda: self.dive_mission("sub_mission.txt")),
 
-        self.close()
+            ("GripperMission",
+             "Test gripper mission items",
+             self.test_gripper_mission),
 
-        if len(self.fail_list):
-            self.progress("FAILED: %s" % self.fail_list)
-            return False
-        return True
+            ("SET_POSITION_TARGET_GLOBAL_INT",
+             "Move vehicle using SET_POSITION_TARGET_GLOBAL_INT",
+             self.dive_set_position_target),
+
+            ("DownLoadLogs", "Download logs", lambda:
+             self.log_download(
+                 self.buildlogs_path("ArduSub-log.bin"),
+                 upload_logs=len(self.fail_list) > 0)),
+        ])
+
+        return ret

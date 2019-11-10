@@ -1,4 +1,5 @@
 #include "AP_Mount_Backend.h"
+#include <AP_AHRS/AP_AHRS.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -19,6 +20,7 @@ void AP_Mount_Backend::set_roi_target(const struct Location &target_loc)
 {
     // set the target gps location
     _state._roi_target = target_loc;
+    _state._roi_target_set_ms = AP_HAL::millis();
 
     // set the mode to GPS tracking mode
     _frontend.set_mode(_instance, MAV_MOUNT_MODE_GPS_POINT);
@@ -61,15 +63,17 @@ void AP_Mount_Backend::control(int32_t pitch_or_lat, int32_t roll_or_lon, int32_
             break;
 
         // set lat, lon, alt position targets from mavlink message
-        case MAV_MOUNT_MODE_GPS_POINT:
-            Location target_location;
-            memset(&target_location, 0, sizeof(target_location));
-            target_location.lat = pitch_or_lat;
-            target_location.lng = roll_or_lon;
-            target_location.alt = yaw_or_alt;
-            target_location.flags.relative_alt = true;
+
+        case MAV_MOUNT_MODE_GPS_POINT: {
+            const Location target_location{
+                pitch_or_lat,
+                roll_or_lon,
+                yaw_or_alt,
+                Location::AltFrame::ABOVE_HOME
+            };
             set_roi_target(target_location);
             break;
+        }
 
         default:
             // do nothing
@@ -79,7 +83,7 @@ void AP_Mount_Backend::control(int32_t pitch_or_lat, int32_t roll_or_lon, int32_
 
 void AP_Mount_Backend::rate_input_rad(float &out, const RC_Channel *chan, float min, float max) const
 {
-    if (chan == nullptr) {
+    if ((chan == nullptr) || (chan->get_radio_in() == 0)) {
         return;
     }
     out += chan->norm_input_dz() * 0.0001f * _frontend._joystick_speed;
@@ -110,37 +114,53 @@ void AP_Mount_Backend::update_targets_from_rc()
                        _state._pan_angle_max);
     } else {
         // allow pilot rate input to come directly from an RC_Channel
-        if (roll_ch) {
+        if ((roll_ch != nullptr) && (roll_ch->get_radio_in() != 0)) {
             _angle_ef_target_rad.x = angle_input_rad(roll_ch, _state._roll_angle_min, _state._roll_angle_max);
         }
-        if (tilt_ch) {
+        if ((tilt_ch != nullptr) && (tilt_ch->get_radio_in() != 0)) {
             _angle_ef_target_rad.y = angle_input_rad(tilt_ch, _state._tilt_angle_min, _state._tilt_angle_max);
         }
-        if (pan_ch) {
+        if ((pan_ch != nullptr) && (pan_ch->get_radio_in() != 0)) {
             _angle_ef_target_rad.z = angle_input_rad(pan_ch, _state._pan_angle_min, _state._pan_angle_max);
         }
     }
 }
 
-// returns the angle (degrees*100) that the RC_Channel input is receiving
-int32_t AP_Mount_Backend::angle_input(const RC_Channel* rc, int16_t angle_min, int16_t angle_max)
-{
-    return (rc->get_reverse() ? -1 : 1) * (rc->get_radio_in() - rc->get_radio_min()) 
-      * (int32_t)(angle_max - angle_min) / (rc->get_radio_max() - rc->get_radio_min()) + (rc->get_reverse() ? angle_max : angle_min);
-}
-
 // returns the angle (radians) that the RC_Channel input is receiving
 float AP_Mount_Backend::angle_input_rad(const RC_Channel* rc, int16_t angle_min, int16_t angle_max)
 {
-    return radians(angle_input(rc, angle_min, angle_max)*0.01f);
+    return radians(((rc->norm_input() + 1.0f) * 0.5f * (angle_max - angle_min) + angle_min)*0.01f);
+}
+
+bool AP_Mount_Backend::calc_angle_to_roi_target(Vector3f& angles_to_target_rad,
+                                                bool calc_tilt,
+                                                bool calc_pan,
+                                                bool relative_pan)
+{
+    if (_state._roi_target_set_ms == 0) {
+        return false;
+    }
+    return calc_angle_to_location(_state._roi_target, angles_to_target_rad, calc_tilt, calc_pan, relative_pan);
 }
 
 // calc_angle_to_location - calculates the earth-frame roll, tilt and pan angles (and radians) to point at the given target
-void AP_Mount_Backend::calc_angle_to_location(const struct Location &target, Vector3f& angles_to_target_rad, bool calc_tilt, bool calc_pan, bool relative_pan)
+bool AP_Mount_Backend::calc_angle_to_location(const struct Location &target, Vector3f& angles_to_target_rad, bool calc_tilt, bool calc_pan, bool relative_pan)
 {
-    float GPS_vector_x = (target.lng-_frontend._current_loc.lng)*cosf(ToRad((_frontend._current_loc.lat+target.lat)*0.00000005f))*0.01113195f;
-    float GPS_vector_y = (target.lat-_frontend._current_loc.lat)*0.01113195f;
-    float GPS_vector_z = (target.alt-_frontend._current_loc.alt);                 // baro altitude(IN CM) should be adjusted to known home elevation before take off (Set altimeter).
+    Location current_loc;
+    if (!AP::ahrs().get_position(current_loc)) {
+        return false;
+    }
+    const float GPS_vector_x = (target.lng-current_loc.lng)*cosf(ToRad((current_loc.lat+target.lat)*0.00000005f))*0.01113195f;
+    const float GPS_vector_y = (target.lat-current_loc.lat)*0.01113195f;
+    int32_t target_alt_cm = 0;
+    if (!target.get_alt_cm(Location::AltFrame::ABOVE_HOME, target_alt_cm)) {
+        return false;
+    }
+    int32_t current_alt_cm = 0;
+    if (!current_loc.get_alt_cm(Location::AltFrame::ABOVE_HOME, current_alt_cm)) {
+        return false;
+    }
+    float GPS_vector_z = target_alt_cm - current_alt_cm;
     float target_distance = 100.0f*norm(GPS_vector_x, GPS_vector_y);      // Careful , centimeters here locally. Baro/alt is in cm, lat/lon is in meters.
 
     // initialise all angles to zero
@@ -159,4 +179,5 @@ void AP_Mount_Backend::calc_angle_to_location(const struct Location &target, Vec
             angles_to_target_rad.z = wrap_PI(angles_to_target_rad.z - AP::ahrs().yaw);
         }
     }
+    return true;
 }

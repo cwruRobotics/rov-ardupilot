@@ -46,7 +46,17 @@ void SRV_Channel::output_ch(void)
             if (SRV_Channels::passthrough_disabled()) {
                 output_pwm = c->get_radio_trim();
             } else {
-                output_pwm = c->get_radio_in();
+                const int16_t radio_in = c->get_radio_in();
+                if (!ign_small_rcin_changes) {
+                    output_pwm = radio_in;
+                    previous_radio_in = radio_in;
+                } else {
+                    // check if rc input value has changed by more than the deadzone
+                    if (abs(radio_in - previous_radio_in) > c->get_dead_zone()) {
+                        output_pwm = radio_in;
+                        ign_small_rcin_changes = false;
+                    }
+                }
             }
         }
     }
@@ -94,6 +104,7 @@ void SRV_Channel::aux_servo_function_setup(void)
     case k_heli_tail_rsc:
     case k_motor_tilt:
     case k_boost_throttle:
+    case k_thrust_out:
         set_range(1000);
         break;
     case k_aileron_with_input:
@@ -114,6 +125,9 @@ void SRV_Channel::aux_servo_function_setup(void)
     case k_elevon_right:
     case k_vtail_left:
     case k_vtail_right:
+    case k_roll_out:
+    case k_pitch_out:
+    case k_yaw_out:
         set_angle(4500);
         break;
     case k_throttle:
@@ -153,7 +167,7 @@ void SRV_Channels::update_aux_servo_function(void)
 /// Should be called after the the servo functions have been initialized
 void SRV_Channels::enable_aux_servos()
 {
-    hal.rcout->set_default_rate(uint16_t(instance->default_rate.get()));
+    hal.rcout->set_default_rate(uint16_t(_singleton->default_rate.get()));
 
     update_aux_servo_function();
 
@@ -161,9 +175,30 @@ void SRV_Channels::enable_aux_servos()
     // includes k_none servos, which allows those to get their initial
     // trim value on startup
     for (uint8_t i = 0; i < NUM_SERVO_CHANNELS; i++) {
+        SRV_Channel &c = channels[i];
         // see if it is a valid function
-        if ((uint8_t)channels[i].function.get() < SRV_Channel::k_nr_aux_servo_functions) {
-            hal.rcout->enable_ch(channels[i].ch_num);
+        if ((uint8_t)c.function.get() < SRV_Channel::k_nr_aux_servo_functions) {
+            hal.rcout->enable_ch(c.ch_num);
+        }
+
+        /*
+          for channels which have been marked as digital output then the
+          MIN/MAX/TRIM values have no meaning for controlling output, as
+          the HAL handles the scaling. We still need to cope with places
+          in the code that may try to set a PWM value however, so to
+          ensure consistency we force the MIN/MAX/TRIM to be consistent
+          across all digital channels. We use a MIN/MAX of 1000/2000, and
+          set TRIM to either 1000 or 1500 depending on whether the channel
+          is reversible
+        */
+        if (digital_mask & (1U<<i)) {
+            c.servo_min.set(1000);
+            c.servo_max.set(2000);
+            if (reversible_mask & (1U<<i)) {
+                c.servo_trim.set(1500);
+            } else {
+                c.servo_trim.set(1000);
+            }
         }
     }
 
