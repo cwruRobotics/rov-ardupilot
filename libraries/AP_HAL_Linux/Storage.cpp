@@ -183,7 +183,10 @@ void Storage::init()
  */
 void Storage::_mark_dirty(uint16_t loc, uint16_t length)
 {
-    uint16_t end = loc + length;
+    if (length == 0) {
+        return;
+    }
+    uint16_t end = loc + length - 1;
     for (uint8_t line=loc>>LINUX_STORAGE_LINE_SHIFT;
          line <= end>>LINUX_STORAGE_LINE_SHIFT;
          line++) {
@@ -262,4 +265,17 @@ void Storage::_timer_tick(void)
             }
         }
     }
+}
+
+/*
+  get storage size and ptr
+ */
+bool Storage::get_storage_ptr(void *&ptr, size_t &size)
+{
+    if (!_initialised) {
+        return false;
+    }
+    ptr = _buffer;
+    size = sizeof(_buffer);
+    return true;
 }

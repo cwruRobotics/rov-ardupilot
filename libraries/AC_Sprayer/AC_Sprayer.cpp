@@ -1,5 +1,7 @@
 #include "AC_Sprayer.h"
 
+#if HAL_SPRAYER_ENABLED
+
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
@@ -103,8 +105,8 @@ void AC_Sprayer::run(const bool true_false)
 
 void AC_Sprayer::stop_spraying()
 {
-    SRV_Channels::set_output_limit(SRV_Channel::k_sprayer_pump, SRV_Channel::SRV_CHANNEL_LIMIT_MIN);
-    SRV_Channels::set_output_limit(SRV_Channel::k_sprayer_spinner, SRV_Channel::SRV_CHANNEL_LIMIT_MIN);
+    SRV_Channels::set_output_limit(SRV_Channel::k_sprayer_pump, SRV_Channel::Limit::MIN);
+    SRV_Channels::set_output_limit(SRV_Channel::k_sprayer_spinner, SRV_Channel::Limit::MIN);
 
     _flags.spraying = false;
 }
@@ -130,7 +132,8 @@ void AC_Sprayer::update()
         // velocity will already be zero but this avoids a coverity warning
         velocity.zero();
     }
-    float ground_speed = norm(velocity.x * 100.0f, velocity.y * 100.0f);
+
+    float ground_speed = velocity.xy().length() * 100.0;
 
     // get the current time
     const uint32_t now = AP_HAL::millis();
@@ -198,3 +201,4 @@ AC_Sprayer *sprayer()
 }
 
 };
+#endif // HAL_SPRAYER_ENABLED

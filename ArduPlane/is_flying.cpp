@@ -15,7 +15,7 @@
 void Plane::update_is_flying_5Hz(void)
 {
     float aspeed=0;
-    bool is_flying_bool;
+    bool is_flying_bool = false;
     uint32_t now_ms = AP_HAL::millis();
 
     uint32_t ground_speed_thresh_cm = (aparm.min_gndspeed_cm > 0) ? ((uint32_t)(aparm.min_gndspeed_cm*0.9f)) : GPS_IS_FLYING_SPEED_CMS;
@@ -24,7 +24,7 @@ void Plane::update_is_flying_5Hz(void)
 
     // airspeed at least 75% of stall speed?
     const float airspeed_threshold = MAX(aparm.airspeed_min,2)*0.75f;
-    bool airspeed_movement = ahrs.airspeed_estimate(&aspeed) && (aspeed >= airspeed_threshold);
+    bool airspeed_movement = ahrs.airspeed_estimate(aspeed) && (aspeed >= airspeed_threshold);
 
     if (gps.status() < AP_GPS::GPS_OK_FIX_2D && arming.is_armed() && !airspeed_movement && isFlyingProbability > 0.3) {
         // when flying with no GPS, use the last airspeed estimate to
@@ -34,9 +34,11 @@ void Plane::update_is_flying_5Hz(void)
         airspeed_movement = aspeed >= airspeed_threshold;
     }
 
-    if (quadplane.is_flying()) {
-        is_flying_bool = true;
-
+#if HAL_QUADPLANE_ENABLED
+    is_flying_bool = quadplane.is_flying();
+#endif
+    if (is_flying_bool) {
+        // no need to look further
     } else if(arming.is_armed()) {
         // when armed assuming flying and we need overwhelming evidence that we ARE NOT flying
         // short drop-outs of GPS are common during flight due to banking which points the antenna in different directions
@@ -48,8 +50,9 @@ void Plane::update_is_flying_5Hz(void)
             // we've flown before, remove GPS constraints temporarily and only use airspeed
             is_flying_bool = airspeed_movement; // moving through the air
         } else {
-            // we've never flown yet, require good GPS movement
-            is_flying_bool = airspeed_movement || // moving through the air
+            // Because ahrs.airspeed_estimate can return a continued high value after landing if flying in
+            // strong winds above stall speed it is necessary to include the IMU based movement check.
+            is_flying_bool = (airspeed_movement && !AP::ins().is_still()) || // moving through the air
                                 gps_confirmed_movement; // locked and we're moving
         }
 
@@ -154,7 +157,9 @@ void Plane::update_is_flying_5Hz(void)
         }
     }
     previous_is_flying = new_is_flying;
+#if HAL_ADSB_ENABLED
     adsb.set_is_flying(new_is_flying);
+#endif
 #if PARACHUTE == ENABLED
     parachute.set_is_flying(new_is_flying);
 #endif
@@ -168,7 +173,10 @@ void Plane::update_is_flying_5Hz(void)
     Log_Write_Status();
 
     // tell AHRS flying state
-    ahrs.set_likely_flying(new_is_flying);
+    set_likely_flying(new_is_flying);
+
+    // conservative ground mode value for rate D suppression
+    ground_mode = !is_flying() && !hal.util->get_soft_armed();
 }
 
 /*
@@ -179,9 +187,11 @@ void Plane::update_is_flying_5Hz(void)
 bool Plane::is_flying(void)
 {
     if (hal.util->get_soft_armed()) {
+#if HAL_QUADPLANE_ENABLED
         if (quadplane.is_flying_vtol()) {
             return true;
         }
+#endif
         // when armed, assume we're flying unless we probably aren't
         return (isFlyingProbability >= 0.1f);
     }
@@ -295,23 +305,13 @@ void Plane::crash_detection_update(void)
 
     } else if ((now_ms - crash_state.debounce_timer_ms >= crash_state.debounce_time_total_ms) && !crash_state.is_crashed) {
         crash_state.is_crashed = true;
-
-        if (aparm.crash_detection_enable == CRASH_DETECT_ACTION_BITMASK_DISABLED) {
-            if (crashed_near_land_waypoint) {
-                gcs().send_text(MAV_SEVERITY_CRITICAL, "Hard landing detected. No action taken");
-            } else {
-                gcs().send_text(MAV_SEVERITY_EMERGENCY, "Crash detected. No action taken");
-            }
+        if (aparm.crash_detection_enable & CRASH_DETECT_ACTION_BITMASK_DISARM) {
+            arming.disarm(AP_Arming::Method::CRASH);
         }
-        else {
-            if (aparm.crash_detection_enable & CRASH_DETECT_ACTION_BITMASK_DISARM) {
-                arming.disarm();
-            }
-            if (crashed_near_land_waypoint) {
-                gcs().send_text(MAV_SEVERITY_CRITICAL, "Hard landing detected");
-            } else {
-                gcs().send_text(MAV_SEVERITY_EMERGENCY, "Crash detected");
-            }
+        if (crashed_near_land_waypoint) {
+            gcs().send_text(MAV_SEVERITY_CRITICAL, "Hard landing detected");
+        } else {
+            gcs().send_text(MAV_SEVERITY_EMERGENCY, "Crash detected");
         }
     }
 }
@@ -324,9 +324,13 @@ bool Plane::in_preLaunch_flight_stage(void)
     if (control_mode == &mode_takeoff && throttle_suppressed) {
         return true;
     }
+#if HAL_QUADPLANE_ENABLED
+    if (quadplane.is_vtol_takeoff(mission.get_current_nav_cmd().id)) {
+        return false;
+    }
+#endif
     return (control_mode == &mode_auto &&
             throttle_suppressed &&
             flight_stage == AP_Vehicle::FixedWing::FLIGHT_NORMAL &&
-            mission.get_current_nav_cmd().id == MAV_CMD_NAV_TAKEOFF &&
-            !quadplane.is_vtol_takeoff(mission.get_current_nav_cmd().id));
+            mission.get_current_nav_cmd().id == MAV_CMD_NAV_TAKEOFF);
 }

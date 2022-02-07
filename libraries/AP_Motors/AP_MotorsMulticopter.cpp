@@ -13,15 +13,10 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- *       AP_MotorsMulticopter.cpp - ArduCopter multicopter motors library
- *       Code by Randy Mackay and Robert Lefebvre. DIYDrones.com
- *
- */
-
 #include "AP_MotorsMulticopter.h"
 #include <AP_HAL/AP_HAL.h>
 #include <AP_BattMonitor/AP_BattMonitor.h>
+#include <AP_Logger/AP_Logger.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -43,8 +38,8 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
 
     // @Param: THST_EXPO
     // @DisplayName: Thrust Curve Expo
-    // @Description: Motor thrust curve exponent (from 0 for linear to 1.0 for second order curve)
-    // @Range: 0.25 0.8
+    // @Description: Motor thrust curve exponent (0.0 for linear to 1.0 for second order curve)
+    // @Range: -1.0 1.0
     // @User: Advanced
     AP_GROUPINFO("THST_EXPO", 8, AP_MotorsMulticopter, _thrust_curve_expo, AP_MOTORS_THST_EXPO_DEFAULT),
 
@@ -57,16 +52,16 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
 
     // @Param: BAT_VOLT_MAX
     // @DisplayName: Battery voltage compensation maximum voltage
-    // @Description: Battery voltage compensation maximum voltage (voltage above this will have no additional scaling effect on thrust).  Recommend 4.4 * cell count, 0 = Disabled
-    // @Range: 6 35
+    // @Description: Battery voltage compensation maximum voltage (voltage above this will have no additional scaling effect on thrust).  Recommend 4.2 * cell count, 0 = Disabled
+    // @Range: 6 53
     // @Units: V
     // @User: Advanced
     AP_GROUPINFO("BAT_VOLT_MAX", 10, AP_MotorsMulticopter, _batt_voltage_max, AP_MOTORS_BAT_VOLT_MAX_DEFAULT),
 
     // @Param: BAT_VOLT_MIN
     // @DisplayName: Battery voltage compensation minimum voltage
-    // @Description: Battery voltage compensation minimum voltage (voltage below this will have no additional scaling effect on thrust).  Recommend 3.5 * cell count, 0 = Disabled
-    // @Range: 6 35
+    // @Description: Battery voltage compensation minimum voltage (voltage below this will have no additional scaling effect on thrust).  Recommend 3.3 * cell count, 0 = Disabled
+    // @Range: 6 42
     // @Units: V
     // @User: Advanced
     AP_GROUPINFO("BAT_VOLT_MIN", 11, AP_MotorsMulticopter, _batt_voltage_min, AP_MOTORS_BAT_VOLT_MIN_DEFAULT),
@@ -84,26 +79,26 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
     // @Param: PWM_TYPE
     // @DisplayName: Output PWM type
     // @Description: This selects the output PWM type, allowing for normal PWM continuous output, OneShot, brushed or DShot motor output
-    // @Values: 0:Normal,1:OneShot,2:OneShot125,3:Brushed,4:DShot150,5:DShot300,6:DShot600,7:DShot1200
+    // @Values: 0:Normal,1:OneShot,2:OneShot125,3:Brushed,4:DShot150,5:DShot300,6:DShot600,7:DShot1200,8:PWMRange
     // @User: Advanced
     // @RebootRequired: True
     AP_GROUPINFO("PWM_TYPE", 15, AP_MotorsMulticopter, _pwm_type, PWM_TYPE_NORMAL),
 
     // @Param: PWM_MIN
-    // @DisplayName: PWM output miniumum
-    // @Description: This sets the min PWM output value in microseconds that will ever be output to the motors, 0 = use input RC3_MIN
+    // @DisplayName: PWM output minimum
+    // @Description: This sets the min PWM output value in microseconds that will ever be output to the motors
     // @Units: PWM
     // @Range: 0 2000
     // @User: Advanced
-    AP_GROUPINFO("PWM_MIN", 16, AP_MotorsMulticopter, _pwm_min, 0),
+    AP_GROUPINFO("PWM_MIN", 16, AP_MotorsMulticopter, _pwm_min, 1000),
 
     // @Param: PWM_MAX
     // @DisplayName: PWM output maximum
-    // @Description: This sets the max PWM value in microseconds that will ever be output to the motors, 0 = use input RC3_MAX
+    // @Description: This sets the max PWM value in microseconds that will ever be output to the motors
     // @Units: PWM
     // @Range: 0 2000
     // @User: Advanced
-    AP_GROUPINFO("PWM_MAX", 17, AP_MotorsMulticopter, _pwm_max, 0),
+    AP_GROUPINFO("PWM_MAX", 17, AP_MotorsMulticopter, _pwm_max, 2000),
 
     // @Param: SPIN_MIN
     // @DisplayName: Motor Spin minimum
@@ -227,9 +222,6 @@ AP_MotorsMulticopter::AP_MotorsMulticopter(uint16_t loop_rate, uint16_t speed_hz
     _batt_voltage_filt.set_cutoff_frequency(AP_MOTORS_BATT_VOLT_FILT_HZ);
     _batt_voltage_filt.reset(1.0f);
 
-    // default throttle range
-    _throttle_radio_min = 1100;
-    _throttle_radio_max = 1900;
 };
 
 // output - sends commands to the motors
@@ -266,6 +258,8 @@ void AP_MotorsMulticopter::output_boost_throttle(void)
     if (_boost_scale > 0) {
         float throttle = constrain_float(get_throttle() * _boost_scale, 0, 1);
         SRV_Channels::set_output_scaled(SRV_Channel::k_boost_throttle, throttle * 1000);
+    } else {
+        SRV_Channels::set_output_scaled(SRV_Channel::k_boost_throttle, 0);
     }
 }
 
@@ -311,7 +305,7 @@ float AP_MotorsMulticopter::get_current_limit_max_throttle()
     float _batt_current;
 
     if (_batt_current_max <= 0 || // return maximum if current limiting is disabled
-        !_flags.armed || // remove throttle limit if disarmed
+        !armed() || // remove throttle limit if disarmed
         !battery.current_amps(_batt_current, _batt_idx)) { // no current monitoring is available
         _throttle_limit = 1.0f;
         return 1.0f;
@@ -342,20 +336,38 @@ float AP_MotorsMulticopter::get_current_limit_max_throttle()
 // apply_thrust_curve_and_volt_scaling - returns throttle in the range 0 ~ 1
 float AP_MotorsMulticopter::apply_thrust_curve_and_volt_scaling(float thrust) const
 {
-    float throttle_ratio = thrust;
-    // apply thrust curve - domain 0.0 to 1.0, range 0.0 to 1.0
+    float battery_scale = 1.0;
+    if (is_positive(_batt_voltage_filt.get())) {
+        battery_scale = 1.0 / _batt_voltage_filt.get();
+    }
+    // apply thrust curve - domain -1.0 to 1.0, range -1.0 to 1.0
     float thrust_curve_expo = constrain_float(_thrust_curve_expo, -1.0f, 1.0f);
-    if (fabsf(thrust_curve_expo) < 0.001) {
+    if (is_zero(thrust_curve_expo)) {
         // zero expo means linear, avoid floating point exception for small values
-        return thrust;
+        return _lift_max * thrust * battery_scale;
     }
-    if (!is_zero(_batt_voltage_filt.get())) {
-        throttle_ratio = ((thrust_curve_expo - 1.0f) + safe_sqrt((1.0f - thrust_curve_expo) * (1.0f - thrust_curve_expo) + 4.0f * thrust_curve_expo * _lift_max * thrust)) / (2.0f * thrust_curve_expo * _batt_voltage_filt.get());
-    } else {
-        throttle_ratio = ((thrust_curve_expo - 1.0f) + safe_sqrt((1.0f - thrust_curve_expo) * (1.0f - thrust_curve_expo) + 4.0f * thrust_curve_expo * _lift_max * thrust)) / (2.0f * thrust_curve_expo);
-    }
+    float throttle_ratio = ((thrust_curve_expo - 1.0f) + safe_sqrt((1.0f - thrust_curve_expo) * (1.0f - thrust_curve_expo) + 4.0f * thrust_curve_expo * _lift_max * thrust)) / (2.0f * thrust_curve_expo);
+    return constrain_float(throttle_ratio * battery_scale, 0.0f, 1.0f);
+}
 
-    return constrain_float(throttle_ratio, 0.0f, 1.0f);
+// inverse of above, tested with AP_Motors/examples/expo_inverse_test
+// used to calculate equivelent motor throttle level to direct ouput, used in tailsitter transtions
+float AP_MotorsMulticopter::remove_thrust_curve_and_volt_scaling(float throttle) const
+{
+    float battery_scale = 1.0;
+    if (is_positive(_batt_voltage_filt.get())) {
+        battery_scale = 1.0 / _batt_voltage_filt.get();
+    }
+    // apply thrust curve - domain -1.0 to 1.0, range -1.0 to 1.0
+    float thrust_curve_expo = constrain_float(_thrust_curve_expo, -1.0f, 1.0f);
+    if (is_zero(thrust_curve_expo)) {
+        // zero expo means linear, avoid floating point exception for small values
+        return  throttle / (_lift_max * battery_scale);
+    }
+    float thrust = ((throttle / battery_scale) * (2.0f * thrust_curve_expo)) - (thrust_curve_expo - 1.0f);
+    thrust = (thrust * thrust) - ((1.0f - thrust_curve_expo) * (1.0f - thrust_curve_expo));
+    thrust /=  4.0f * thrust_curve_expo * _lift_max;
+    return constrain_float(thrust, 0.0f, 1.0f);
 }
 
 // update_lift_max from battery voltage - used for voltage compensation
@@ -381,6 +393,21 @@ void AP_MotorsMulticopter::update_lift_max_from_batt_voltage()
     // calculate lift max
     float thrust_curve_expo = constrain_float(_thrust_curve_expo, -1.0f, 1.0f);
     _lift_max = batt_voltage_filt * (1 - thrust_curve_expo) + thrust_curve_expo * batt_voltage_filt * batt_voltage_filt;
+}
+
+// 10hz logging of voltage scaling and max trust
+void AP_MotorsMulticopter::Log_Write()
+{
+    const struct log_MotBatt pkt_mot {
+        LOG_PACKET_HEADER_INIT(LOG_MOTBATT_MSG),
+        time_us         : AP_HAL::micros64(),
+        lift_max        : _lift_max,
+        bat_volt        : _batt_voltage_filt.get(),
+        th_limit        : _throttle_limit,
+        th_average_max  : _throttle_avg_max,
+        mot_fail_flags  : (uint8_t)(_thrust_boost | (_thrust_balanced << 1U)),
+    };
+    AP::logger().WriteBlock(&pkt_mot, sizeof(pkt_mot));
 }
 
 float AP_MotorsMulticopter::get_compensation_gain() const
@@ -421,10 +448,18 @@ int16_t AP_MotorsMulticopter::output_to_pwm(float actuator)
 }
 
 // converts desired thrust to linearized actuator output in a range of 0~1
-float AP_MotorsMulticopter::thrust_to_actuator(float thrust_in)
+float AP_MotorsMulticopter::thrust_to_actuator(float thrust_in) const
 {
     thrust_in = constrain_float(thrust_in, 0.0f, 1.0f);
     return _spin_min + (_spin_max - _spin_min) * apply_thrust_curve_and_volt_scaling(thrust_in);
+}
+
+// inverse of above, tested with AP_Motors/examples/expo_inverse_test
+// used to calculate equivelent motor throttle level to direct ouput, used in tailsitter transtions
+float AP_MotorsMulticopter::actuator_to_thrust(float actuator) const
+{
+    actuator = (actuator - _spin_min) /  (_spin_max - _spin_min);
+    return constrain_float(remove_thrust_curve_and_volt_scaling(actuator), 0.0f, 1.0f);
 }
 
 // adds slew rate limiting to actuator output
@@ -463,42 +498,28 @@ float AP_MotorsMulticopter::actuator_spin_up_to_ground_idle() const
     return constrain_float(_spin_up_ratio, 0.0f, 1.0f) * _spin_min;
 }
 
-// get minimum pwm value that can be output to motors
-int16_t AP_MotorsMulticopter::get_pwm_output_min() const
+// parameter checks for MOT_PWM_MIN/MAX, returns true if parameters are valid
+bool AP_MotorsMulticopter::check_mot_pwm_params() const
 {
-    // return _pwm_min if both PWM_MIN and PWM_MAX parameters are defined and valid
-    if ((_pwm_min > 0) && (_pwm_max > 0) && (_pwm_max > _pwm_min)) {
-        return _pwm_min;
+    // sanity says that minimum should be less than maximum:
+    if (_pwm_min >= _pwm_max) {
+        return false;
     }
-    return _throttle_radio_min;
+    // negative values are out-of-range:
+    if (_pwm_max <= 0) {
+        return false;
+    }
+    return true;
 }
 
-// get maximum pwm value that can be output to motors
-int16_t AP_MotorsMulticopter::get_pwm_output_max() const
+// update_throttle_range - update throttle endpoints
+void AP_MotorsMulticopter::update_throttle_range()
 {
-    // return _pwm_max if both PWM_MIN and PWM_MAX parameters are defined and valid
-    if ((_pwm_min > 0) && (_pwm_max > 0) && (_pwm_max > _pwm_min)) {
-        return _pwm_max;
-    }
-    return _throttle_radio_max;
-}
-
-// set_throttle_range - sets the minimum throttle that will be sent to the engines when they're not off (i.e. to prevents issues with some motors spinning and some not at very low throttle)
-// also sets throttle channel minimum and maximum pwm
-void AP_MotorsMulticopter::set_throttle_range(int16_t radio_min, int16_t radio_max)
-{
-    // sanity check
-    if (radio_max <= radio_min) {
-        return;
-    }
-
-    _throttle_radio_min = radio_min;
-    _throttle_radio_max = radio_max;
-
-    if (_pwm_type >= PWM_TYPE_DSHOT150 && _pwm_type <= PWM_TYPE_DSHOT1200) {
-        // force PWM range for DShot ESCs
-        _pwm_min.set(1000);
-        _pwm_max.set(2000);
+    // if all outputs are digital adjust the range. We also do this for type PWM_RANGE, as those use the
+    // scaled output, which is then mapped to PWM via the SRV_Channel library
+    if (SRV_Channels::have_digital_outputs(get_motor_mask()) || (_pwm_type == PWM_TYPE_PWM_RANGE)) {
+        _pwm_min = 1000;
+        _pwm_max = 2000;
     }
 
     hal.rcout->set_esc_scaling(get_pwm_output_min(), get_pwm_output_max());
@@ -516,7 +537,7 @@ void AP_MotorsMulticopter::update_throttle_hover(float dt)
 // run spool logic
 void AP_MotorsMulticopter::output_logic()
 {
-    if (_flags.armed) {
+    if (armed()) {
         if (_disarm_disable_pwm && (_disarm_safe_timer < _safe_time)) {
             _disarm_safe_timer += 1.0f/_loop_rate;
         } else {
@@ -527,7 +548,7 @@ void AP_MotorsMulticopter::output_logic()
     }
 
     // force desired and current spool mode if disarmed or not interlocked
-    if (!_flags.armed || !_flags.interlock) {
+    if (!armed() || !get_interlock()) {
         _spool_desired = DesiredSpoolState::SHUT_DOWN;
         _spool_state = SpoolState::SHUT_DOWN;
     }
@@ -732,20 +753,23 @@ void AP_MotorsMulticopter::set_throttle_passthrough_for_esc_calibration(float th
 // the range 0 to 1
 void AP_MotorsMulticopter::output_motor_mask(float thrust, uint8_t mask, float rudder_dt)
 {
+    const int16_t pwm_min = get_pwm_output_min();
+    const int16_t pwm_range = get_pwm_output_max() - pwm_min;
+
     for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
         if (motor_enabled[i]) {
-            if (mask & (1U << i)) {
+            if ((mask & (1U << i)) && armed()) {
                 /*
                  apply rudder mixing differential thrust
                  copter frame roll is plane frame yaw as this only
                  apples to either tilted motors or tailsitters
                  */
                 float diff_thrust = get_roll_factor(i) * rudder_dt * 0.5f;
-                set_actuator_with_slew(_actuator[i], thrust_to_actuator(thrust + diff_thrust));
-                int16_t pwm_output = get_pwm_output_min() + (get_pwm_output_max() - get_pwm_output_min()) * _actuator[i];
+                set_actuator_with_slew(_actuator[i], thrust + diff_thrust);
+                int16_t pwm_output = pwm_min + pwm_range * _actuator[i];
                 rc_write(i, pwm_output);
             } else {
-                rc_write(i, get_pwm_output_min());
+                rc_write(i, pwm_min);
             }
         }
     }
@@ -765,4 +789,14 @@ void AP_MotorsMulticopter::save_params_on_disarm()
     if (_throttle_hover_learn == HOVER_LEARN_AND_SAVE) {
         _throttle_hover.save();
     }
+}
+
+// convert to PWM min and max in the motor lib
+void AP_MotorsMulticopter::convert_pwm_min_max_param(int16_t radio_min, int16_t radio_max)
+{
+    if (_pwm_min.configured_in_storage() || _pwm_max.configured_in_storage()) {
+        return;
+    }
+    _pwm_min.set_and_save(radio_min);
+    _pwm_max.set_and_save(radio_max);
 }

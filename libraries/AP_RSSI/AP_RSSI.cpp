@@ -26,7 +26,7 @@ extern const AP_HAL::HAL& hal;
 #endif
 
 #ifndef BOARD_RSSI_ANA_PIN
-#define BOARD_RSSI_ANA_PIN 0
+#define BOARD_RSSI_ANA_PIN -1
 #endif
 
 #ifndef BOARD_RSSI_ANA_PIN_HIGH
@@ -38,20 +38,20 @@ const AP_Param::GroupInfo AP_RSSI::var_info[] = {
     // @Param: TYPE
     // @DisplayName: RSSI Type
     // @Description: Radio Receiver RSSI type. If your radio receiver supports RSSI of some kind, set it here, then set its associated RSSI_XXXXX parameters, if any.
-    // @Values: 0:Disabled,1:AnalogPin,2:RCChannelPwmValue,3:ReceiverProtocol,4:PWMInputPin
+    // @Values: 0:Disabled,1:AnalogPin,2:RCChannelPwmValue,3:ReceiverProtocol,4:PWMInputPin,5:TelemetryRadioRSSI
     // @User: Standard
     AP_GROUPINFO_FLAGS("TYPE", 0, AP_RSSI, rssi_type,  BOARD_RSSI_DEFAULT, AP_PARAM_FLAG_ENABLE),
 
     // @Param: ANA_PIN
     // @DisplayName: Receiver RSSI sensing pin
     // @Description: Pin used to read the RSSI voltage or PWM value
-    // @Values: 8:V5 Nano,11:Pixracer,13:Pixhawk ADC4,14:Pixhawk ADC3,15:Pixhawk ADC6,15:Pixhawk2 ADC,50:PixhawkAUX1,51:PixhawkAUX2,52:PixhawkAUX3,53:PixhawkAUX4,54:PixhawkAUX5,55:PixhawkAUX6,103:Pixhawk SBUS
+    // @Values: 8:V5 Nano,11:Pixracer,13:Pixhawk ADC4,14:Pixhawk ADC3,15:Pixhawk ADC6/Pixhawk2 ADC,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6,103:Pixhawk SBUS
     // @User: Standard
     AP_GROUPINFO("ANA_PIN", 1, AP_RSSI, rssi_analog_pin,  BOARD_RSSI_ANA_PIN),
 
     // @Param: PIN_LOW
     // @DisplayName: RSSI pin's lowest voltage
-    // @Description: RSSI pin's voltage received on the RSSI_ANA_PIN when the signal strength is the weakest. Some radio receivers put out inverted values so this value may be higher than RSSI_PIN_HIGH
+    // @Description: RSSI pin's voltage received on the RSSI_ANA_PIN when the signal strength is the weakest. Some radio receivers put out inverted values so this value may be higher than RSSI_PIN_HIGH. When using pin 103, the maximum value of the parameter is 3.3V.
     // @Units: V
     // @Increment: 0.01
     // @Range: 0 5.0
@@ -60,7 +60,7 @@ const AP_Param::GroupInfo AP_RSSI::var_info[] = {
 
     // @Param: PIN_HIGH
     // @DisplayName: RSSI pin's highest voltage
-    // @Description: RSSI pin's voltage received on the RSSI_ANA_PIN when the signal strength is the strongest. Some radio receivers put out inverted values so this value may be lower than RSSI_PIN_LOW
+    // @Description: RSSI pin's voltage received on the RSSI_ANA_PIN when the signal strength is the strongest. Some radio receivers put out inverted values so this value may be lower than RSSI_PIN_LOW. When using pin 103, the maximum value of the parameter is 3.3V.
     // @Units: V
     // @Increment: 0.01
     // @Range: 0 5.0
@@ -147,9 +147,20 @@ float AP_RSSI::read_receiver_rssi()
         }
         case RssiType::PWM_PIN:
             return read_pwm_pin_rssi();
+        case RssiType::TELEMETRY_RADIO_RSSI:
+            return read_telemetry_radio_rssi();
     }
     // should never get to here
     return 0.0f;
+}
+
+// Only valid for RECEIVER type RSSI selections. Returns -1 if protocol does not provide link quality report.
+float AP_RSSI::read_receiver_link_quality()
+{
+    if (RssiType(rssi_type.get()) == RssiType::RECEIVER) {
+        return RC_Channels::get_receiver_link_quality();
+    }
+    return -1;
 }
 
 // Read the receiver RSSI value as an 8-bit integer
@@ -165,7 +176,9 @@ uint8_t AP_RSSI::read_receiver_rssi_uint8()
 // read the RSSI value from an analog pin - returns float in range 0.0 to 1.0
 float AP_RSSI::read_pin_rssi()
 {
-    rssi_analog_source->set_pin(rssi_analog_pin);
+    if (!rssi_analog_source || !rssi_analog_source->set_pin(rssi_analog_pin)) {
+        return 0;
+    }
     float current_analog_voltage = rssi_analog_source->voltage_average();
 
     return scale_and_constrain_float_rssi(current_analog_voltage, rssi_analog_pin_range_low, rssi_analog_pin_range_high);
@@ -183,66 +196,19 @@ float AP_RSSI::read_channel_rssi()
     return channel_rssi;    
 }
 
-void AP_RSSI::check_pwm_pin_rssi()
-{
-    if (rssi_analog_pin == pwm_state.last_rssi_analog_pin) {
-        return;
-    }
-
-    // detach last one
-    if (pwm_state.last_rssi_analog_pin) {
-        if (!hal.gpio->detach_interrupt(pwm_state.last_rssi_analog_pin)) {
-            gcs().send_text(MAV_SEVERITY_WARNING,
-                            "RSSI: Failed to detach from pin %u",
-                            pwm_state.last_rssi_analog_pin);
-            // ignore this failure or the user may be stuck
-        }
-    }
-
-    pwm_state.last_rssi_analog_pin = rssi_analog_pin;
-
-    if (!rssi_analog_pin) {
-        // don't need to install handler
-        return;
-    }
-
-    // install interrupt handler on rising and falling edge
-    hal.gpio->pinMode(rssi_analog_pin, HAL_GPIO_INPUT);
-    if (!hal.gpio->attach_interrupt(
-            rssi_analog_pin,
-            FUNCTOR_BIND_MEMBER(&AP_RSSI::irq_handler,
-                                void,
-                                uint8_t,
-                                bool,
-                                uint32_t),
-            AP_HAL::GPIO::INTERRUPT_BOTH)) {
-        // failed to attach interrupt
-        gcs().send_text(MAV_SEVERITY_WARNING,
-                        "RSSI: Failed to attach to pin %u",
-                        (unsigned int)rssi_analog_pin);
-        return;
-    }
-}
-
 // read the PWM value from a pin
 float AP_RSSI::read_pwm_pin_rssi()
 {
     // check if pin has changed and configure interrupt handlers if required:
-    check_pwm_pin_rssi();
-
-    if (!pwm_state.last_rssi_analog_pin) {
+    if (!pwm_state.pwm_source.set_pin(rssi_analog_pin, "RSSI")) {
         // disabled (either by configuration or failure to attach interrupt)
         return 0.0f;
     }
 
-    // disable interrupts and grab state
-    void *irqstate = hal.scheduler->disable_interrupts_save();
-    const uint32_t irq_value_us = pwm_state.irq_value_us;
-    pwm_state.irq_value_us = 0;
-    hal.scheduler->restore_interrupts(irqstate);
+    uint16_t pwm_us = pwm_state.pwm_source.get_pwm_us();
 
     const uint32_t now = AP_HAL::millis();
-    if (irq_value_us == 0) {
+    if (pwm_us == 0) {
         // no reading; check for timeout:
         if (now - pwm_state.last_reading_ms > 1000) {
             // no reading for a second - something is broken
@@ -250,11 +216,16 @@ float AP_RSSI::read_pwm_pin_rssi()
         }
     } else {
         // a new reading - convert pwm value to rssi value
-        pwm_state.rssi_value = scale_and_constrain_float_rssi(irq_value_us, rssi_channel_low_pwm_value, rssi_channel_high_pwm_value);
+        pwm_state.rssi_value = scale_and_constrain_float_rssi(pwm_us, rssi_channel_low_pwm_value, rssi_channel_high_pwm_value);
         pwm_state.last_reading_ms = now;
     }
 
     return pwm_state.rssi_value;
+}
+
+float AP_RSSI::read_telemetry_radio_rssi()
+{
+    return GCS_MAVLINK::telemetry_radio_rssi();
 }
 
 // Scale and constrain a float rssi value to 0.0 to 1.0 range 
@@ -285,19 +256,6 @@ float AP_RSSI::scale_and_constrain_float_rssi(float current_rssi_value, float lo
     // Make absolutely sure the value is clipped to the 0.0 - 1.0 range. This should handle things if the
     // value retrieved falls outside the user-supplied range.
     return constrain_float(rssi_value_scaled, 0.0f, 1.0f);
-}
-
-// interrupt handler for reading pwm value
-void AP_RSSI::irq_handler(uint8_t pin, bool pin_high, uint32_t timestamp_us)
-{
-    if (pin_high) {
-        pwm_state.pulse_start_us = timestamp_us;
-    } else {
-        if (pwm_state.pulse_start_us != 0) {
-            pwm_state.irq_value_us = timestamp_us - pwm_state.pulse_start_us;
-            pwm_state.pulse_start_us = 0;
-        }
-    }
 }
 
 AP_RSSI *AP_RSSI::_singleton = nullptr;

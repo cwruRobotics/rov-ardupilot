@@ -21,6 +21,7 @@
 
 #include <AP_Common/AP_Common.h>
 #include "AP_Mount.h"
+#if HAL_MOUNT_ENABLED
 #include <RC_Channel/RC_Channel.h>
 
 class AP_Mount_Backend
@@ -57,13 +58,16 @@ public:
     // set_roi_target - sets target location that mount should attempt to point towards
     void set_roi_target(const struct Location &target_loc);
 
+    // set_sys_target - sets system that mount should attempt to point towards
+    void set_target_sysid(uint8_t sysid);
+
     // control - control the mount
     virtual void control(int32_t pitch_or_lat, int32_t roll_or_lon, int32_t yaw_or_alt, MAV_MOUNT_MODE mount_mode);
     
-    // process MOUNT_CONFIGURE messages received from GCS:
+    // process MOUNT_CONFIGURE messages received from GCS. deprecated.
     void handle_mount_configure(const mavlink_mount_configure_t &msg);
 
-    // process MOUNT_CONTROL messages received from GCS:
+    // process MOUNT_CONTROL messages received from GCS. deprecated.
     void handle_mount_control(const mavlink_mount_control_t &packet);
 
     // send_mount_status - called to allow mounts to send their status to GCS via MAVLink
@@ -77,6 +81,9 @@ public:
 
     // send a GIMBAL_REPORT message to the GCS
     virtual void send_gimbal_report(const mavlink_channel_t chan) {}
+
+    // handle a GLOBAL_POSITION_INT message
+    bool handle_global_position_int(uint8_t msg_sysid, const mavlink_global_position_int_t &packet);
 
 protected:
 
@@ -92,14 +99,23 @@ protected:
                                 Vector3f& angles_to_target_rad,
                                 bool calc_tilt,
                                 bool calc_pan,
-                                bool relative_pan = true) WARN_IF_UNUSED;
+                                bool relative_pan = true) const WARN_IF_UNUSED;
+
     // calc_angle_to_roi_target - calculates the earth-frame roll, tilt
     // and pan angles (and radians) to point at the ROI-target (as set
     // by various mavlink messages)
     bool calc_angle_to_roi_target(Vector3f& angles_to_target_rad,
                                   bool calc_tilt,
                                   bool calc_pan,
-                                  bool relative_pan = true) WARN_IF_UNUSED;
+                                  bool relative_pan = true) const WARN_IF_UNUSED;
+
+    // calc_angle_to_sysid_target - calculates the earth-frame roll, tilt
+    // and pan angles (and radians) to point at the sysid-target (as set
+    // by various mavlink messages)
+    bool calc_angle_to_sysid_target(Vector3f& angles_to_target_rad,
+                                    bool calc_tilt,
+                                    bool calc_pan,
+                                    bool relative_pan = true) const WARN_IF_UNUSED;
 
     // get the mount mode from frontend
     MAV_MOUNT_MODE get_mode(void) const { return _frontend.get_mode(_instance); }
@@ -113,3 +129,5 @@ private:
 
     void rate_input_rad(float &out, const RC_Channel *ch, float min, float max) const;
 };
+
+#endif // HAL_MOUNT_ENABLED

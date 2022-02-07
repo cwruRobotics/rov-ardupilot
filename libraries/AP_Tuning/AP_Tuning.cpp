@@ -49,7 +49,7 @@ const AP_Param::GroupInfo AP_Tuning::var_info[] = {
 
     // @Param: ERR_THRESH
     // @DisplayName: Controller error threshold
-    // @Description: This sets the controller error threshold above which an alarm will sound and a message will be sent to the GCS to warn of controller instability
+    // @Description: This sets the controller error threshold above which an alarm will sound and a message will be sent to the GCS to warn of controller instability while tuning. The error is the rms value of the P+D corrections in the loop. High values in hover indicate possible instability due to too high PID gains or excessively high D to P gain ratios.-1 will disable this message.
     // @Range: 0 1
     // @User: Standard
     AP_GROUPINFO("ERR_THRESH", 7, AP_Tuning, error_threshold, 0.15f),
@@ -75,7 +75,7 @@ void AP_Tuning::check_selector_switch(void)
         return;
     }
     uint16_t selector_in = selchan->get_radio_in();
-    if (selector_in >= 1700) {
+    if (selector_in >= RC_Channel::AUX_PWM_TRIGGER_HIGH) {
         // high selector
         if (selector_start_ms == 0) {
             selector_start_ms = AP_HAL::millis();
@@ -90,7 +90,7 @@ void AP_Tuning::check_selector_switch(void)
             changed = false;
             need_revert = 0;
         }
-    } else if (selector_in <= 1300) {
+    } else if (selector_in <= RC_Channel::AUX_PWM_TRIGGER_LOW) {
         // low selector
         if (selector_start_ms != 0) {
             uint32_t hold_time = AP_HAL::millis() - selector_start_ms;
@@ -233,7 +233,14 @@ void AP_Tuning::check_input(uint8_t flightmode)
  */
 void AP_Tuning::Log_Write_Parameter_Tuning(float value)
 {
-    AP::logger().Write("PTUN", "TimeUS,Set,Parm,Value,CenterValue", "QBBff",
+// @LoggerMessage: PRTN
+// @Description: Plane Parameter Tuning data
+// @Field: TimeUS: Time since system startup
+// @Field: Set: Parameter set being tuned
+// @Field: Parm: Parameter being tuned
+// @Field: Value: Current parameter value
+// @Field: CenterValue: Center value (startpoint of current modifications) of parameter being tuned
+    AP::logger().Write("PRTN", "TimeUS,Set,Parm,Value,CenterValue", "QBBff",
                                            AP_HAL::micros64(),
                                            parmset,
                                            current_parm,
@@ -335,7 +342,7 @@ const char *AP_Tuning::get_tuning_name(uint8_t parm)
 void AP_Tuning::check_controller_error(void)
 {
     float err = controller_error(current_parm);
-    if (err > error_threshold) {
+    if (err > error_threshold && !mid_point_wait && error_threshold > 0) {
         uint32_t now = AP_HAL::millis();
         if (now - last_controller_error_ms > 2000 && hal.util->get_soft_armed()) {
             AP_Notify::events.tune_error = 1;

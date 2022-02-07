@@ -29,10 +29,10 @@
 class ChibiOS::AnalogSource : public AP_HAL::AnalogSource {
 public:
     friend class ChibiOS::AnalogIn;
-    AnalogSource(int16_t pin, float initial_value);
+    AnalogSource(int16_t pin);
     float read_average() override;
     float read_latest() override;
-    void set_pin(uint8_t p) override;
+    bool set_pin(uint8_t p) override WARN_IF_UNUSED;
     float voltage_average() override;
     float voltage_latest() override;
     float voltage_average_ratiometric() override;
@@ -61,17 +61,20 @@ public:
     float board_voltage(void) override { return _board_voltage; }
     float servorail_voltage(void) override { return _servorail_voltage; }
     uint16_t power_status_flags(void) override { return _power_flags; }
-    static void adccallback(ADCDriver *adcp);
+    uint16_t accumulated_power_status_flags(void) const override { return _accumulated_power_flags; }
+
+#if HAL_WITH_MCU_MONITORING
+    float mcu_temperature(void) override { return _mcu_temperature; }
+    float mcu_voltage(void) override { return _mcu_voltage; }
+    float mcu_voltage_max(void) override { return _mcu_voltage_max; }
+    float mcu_voltage_min(void) override { return _mcu_voltage_min; }
+#endif
 
 private:
     void read_adc(uint32_t *val);
     void update_power_flags(void);
+    static void adccallback(ADCDriver *adcp);
 
-    int _battery_handle;
-    int _servorail_handle;
-    int _system_power_handle;
-    uint64_t _battery_timestamp;
-    uint64_t _servorail_timestamp;
     ChibiOS::AnalogSource* _channels[ANALOG_MAX_CHANNELS];
 
     uint32_t _last_run;
@@ -79,6 +82,8 @@ private:
     float _servorail_voltage;
     float _rssi_voltage;
     uint16_t _power_flags;
+    uint16_t _accumulated_power_flags;  // bitmask of all _power_flags ever set
+
     ADCConversionGroup adcgrpcfg;
 
     struct pin_info {
@@ -90,6 +95,25 @@ private:
     static adcsample_t *samples;
     static uint32_t sample_sum[];
     static uint32_t sample_count;
+
+    HAL_Semaphore _semaphore;
+
+#if HAL_WITH_MCU_MONITORING
+    // use ADC3 for MCU temperature and voltage monitoring
+    void setup_adc3();
+    void read_adc3(uint32_t *val, uint16_t *min, uint16_t *max);
+    ADCConversionGroup adc3grpcfg;
+    static void adc3callback(ADCDriver *adcp);
+    static adcsample_t *samples_adc3;
+    static uint32_t sample_adc3_sum[];
+    static uint16_t sample_adc3_max[];
+    static uint16_t sample_adc3_min[];
+    static uint32_t sample_adc3_count;
+    float _mcu_temperature;
+    float _mcu_voltage;
+    float _mcu_voltage_min;
+    float _mcu_voltage_max;
+#endif
 };
 
 #endif // HAL_USE_ADC

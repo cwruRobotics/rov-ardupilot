@@ -23,6 +23,8 @@
 #include <AP_HAL/Util.h>
 #include <AP_Logger/AP_Logger.h>
 #include <GCS_MAVLink/GCS.h>
+#include "RTCM3_Parser.h"
+#include <stdio.h>
 
 #if CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_NAVIO || \
     CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_BH
@@ -34,30 +36,54 @@
 
 #define UBLOX_DEBUGGING 0
 #define UBLOX_FAKE_3DLOCK 0
+#ifndef CONFIGURE_PPS_PIN
 #define CONFIGURE_PPS_PIN 0
+#endif
+
+// this is number of epochs per output. A higher value will reduce
+// the uart bandwidth needed and allow for higher latency
+#define RTK_MB_RTCM_RATE 1
+
+// use this to enable debugging of moving baseline configs
+#define UBLOX_MB_DEBUGGING 0
 
 extern const AP_HAL::HAL& hal;
 
-#ifdef HAL_NO_GCS
-#define GCS_SEND_TEXT(severity, format, args...)
-#else
-#define GCS_SEND_TEXT(severity, format, args...) gcs().send_text(severity, format, ##args)
-#endif
-
 #if UBLOX_DEBUGGING
+#if defined(HAL_BUILD_AP_PERIPH)
+ extern "C" {
+   void can_printf(const char *fmt, ...);
+ }
+ # define Debug(fmt, args ...)  do {can_printf("%s:%d: " fmt "\n", __FUNCTION__, __LINE__, ## args);} while(0)
+#else
  # define Debug(fmt, args ...)  do {hal.console->printf("%s:%d: " fmt "\n", __FUNCTION__, __LINE__, ## args); hal.scheduler->delay(1); } while(0)
+#endif
 #else
  # define Debug(fmt, args ...)
 #endif
 
-AP_GPS_UBLOX::AP_GPS_UBLOX(AP_GPS &_gps, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port) :
+#if UBLOX_MB_DEBUGGING
+#if defined(HAL_BUILD_AP_PERIPH)
+ extern "C" {
+   void can_printf(const char *fmt, ...);
+ }
+ # define MB_Debug(fmt, args ...)  do {can_printf("%s:%d: " fmt "\n", __FUNCTION__, __LINE__, ## args);} while(0)
+#else
+ # define MB_Debug(fmt, args ...)  do {hal.console->printf("%s:%d: " fmt "\n", __FUNCTION__, __LINE__, ## args); hal.scheduler->delay(1); } while(0)
+#endif
+#else
+ # define MB_Debug(fmt, args ...)
+#endif
+
+AP_GPS_UBLOX::AP_GPS_UBLOX(AP_GPS &_gps, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port, AP_GPS::GPS_Role _role) :
     AP_GPS_Backend(_gps, _state, _port),
     _next_message(STEP_PVT),
     _ublox_port(255),
     _unconfigured_messages(CONFIG_ALL),
     _hardware_generation(UBLOX_UNKNOWN_HARDWARE_GENERATION),
     next_fix(AP_GPS::NO_FIX),
-    noReceivedHdop(true)
+    noReceivedHdop(true),
+    role(_role)
 {
     // stop any config strings that are pending
     gps.send_blob_start(state.instance, nullptr, 0);
@@ -68,7 +94,133 @@ AP_GPS_UBLOX::AP_GPS_UBLOX(AP_GPS &_gps, AP_GPS::GPS_State &_state, AP_HAL::UART
 #if CONFIGURE_PPS_PIN
     _unconfigured_messages |= CONFIG_TP5;
 #endif
+
+#if GPS_MOVING_BASELINE
+    if (role == AP_GPS::GPS_ROLE_MB_BASE && !mb_use_uart2()) {
+        rtcm3_parser = new RTCM3_Parser;
+        if (rtcm3_parser == nullptr) {
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "u-blox %d: failed RTCMv3 parser allocation", state.instance + 1);
+        }
+        _unconfigured_messages |= CONFIG_RTK_MOVBASE;
+    }
+    if (role == AP_GPS::GPS_ROLE_MB_ROVER) {
+        _unconfigured_messages |= CONFIG_RTK_MOVBASE;
+        state.gps_yaw_configured = true;
+    }
+#endif
 }
+
+AP_GPS_UBLOX::~AP_GPS_UBLOX()
+{
+#if GPS_MOVING_BASELINE
+    delete rtcm3_parser;
+#endif
+}
+
+#if GPS_MOVING_BASELINE
+/*
+  config for F9 GPS in moving baseline base role
+  See ZED-F9P integration manual section 3.1.5.6.1
+ */
+const AP_GPS_UBLOX::config_list AP_GPS_UBLOX::config_MB_Base_uart1[] {
+ { ConfigKey::CFG_UART1OUTPROT_RTCM3X, 1},
+ { ConfigKey::CFG_UART2OUTPROT_RTCM3X, 0},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART1, 0},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART1, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART1, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART1, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART1, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART1, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART1, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART1, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART2, 0},
+};
+
+const AP_GPS_UBLOX::config_list AP_GPS_UBLOX::config_MB_Base_uart2[] {
+ { ConfigKey::CFG_UART2_ENABLED, 1},
+ { ConfigKey::CFG_UART2_BAUDRATE, 460800},
+ { ConfigKey::CFG_UART2OUTPROT_RTCM3X, 1},
+ { ConfigKey::CFG_UART1OUTPROT_RTCM3X, 0},
+ { ConfigKey::CFG_UART1INPROT_RTCM3X, 1},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART2, 0},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART2, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART2, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART2, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART2, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART2, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART2, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART2, RTK_MB_RTCM_RATE},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART1, 0},
+};
+
+
+/*
+  config for F9 GPS in moving baseline rover role
+  See ZED-F9P integration manual section 3.1.5.6.1.
+  Note that we list the RTCM msg types as 0 to prevent getting RTCM
+  data from a GPS previously configured as a base
+ */
+const AP_GPS_UBLOX::config_list AP_GPS_UBLOX::config_MB_Rover_uart1[] {
+ { ConfigKey::CFG_UART2OUTPROT_RTCM3X, 0},
+ { ConfigKey::CFG_UART1INPROT_RTCM3X, 1},
+ { ConfigKey::CFG_UART2INPROT_RTCM3X, 0},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART1, 1},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART2, 0},
+};
+
+const AP_GPS_UBLOX::config_list AP_GPS_UBLOX::config_MB_Rover_uart2[] {
+ { ConfigKey::CFG_UART2_ENABLED, 1},
+ { ConfigKey::CFG_UART2_BAUDRATE, 460800},
+ { ConfigKey::CFG_UART2OUTPROT_RTCM3X, 0},
+ { ConfigKey::CFG_UART2INPROT_RTCM3X, 1},
+ { ConfigKey::CFG_UART1INPROT_RTCM3X, 0},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART1, 1},
+ { ConfigKey::MSGOUT_UBX_NAV_RELPOSNED_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART2, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_0_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE4072_1_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1077_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1087_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1097_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1127_UART1, 0},
+ { ConfigKey::MSGOUT_RTCM_3X_TYPE1230_UART1, 0},
+};
+#endif // GPS_MOVING_BASELINE
+
 
 void
 AP_GPS_UBLOX::_request_next_config(void)
@@ -119,7 +271,7 @@ AP_GPS_UBLOX::_request_next_config(void)
         }
         break;
     case STEP_POLL_SBAS:
-        if (gps._sbas_mode != 2) {
+        if (gps._sbas_mode != AP_GPS::SBAS_Mode::DoNotChange) {
             _send_message(CLASS_CFG, MSG_CFG_SBAS, nullptr, 0);
         } else {
             _unconfigured_messages &= ~CONFIG_SBAS;
@@ -212,11 +364,35 @@ AP_GPS_UBLOX::_request_next_config(void)
         }
         break;
     case STEP_TMODE:
-        if (_hardware_generation >= UBLOX_F9) {
+        if (supports_F9_config()) {
             if (!_configure_valget(ConfigKey::TMODE_MODE)) {
                 _next_message--;
             }
         }
+        break;
+    case STEP_RTK_MOVBASE:
+#if GPS_MOVING_BASELINE
+        if (supports_F9_config()) {
+            static_assert(sizeof(active_config.done_mask)*8 >= ARRAY_SIZE(config_MB_Base_uart1), "done_mask too small, base1");
+            static_assert(sizeof(active_config.done_mask)*8 >= ARRAY_SIZE(config_MB_Base_uart2), "done_mask too small, base2");
+            static_assert(sizeof(active_config.done_mask)*8 >= ARRAY_SIZE(config_MB_Rover_uart1), "done_mask too small, rover1");
+            static_assert(sizeof(active_config.done_mask)*8 >= ARRAY_SIZE(config_MB_Rover_uart2), "done_mask too small, rover2");
+            if (role == AP_GPS::GPS_ROLE_MB_BASE) {
+                const config_list *list = mb_use_uart2()?config_MB_Base_uart2:config_MB_Base_uart1;
+                uint8_t list_length = mb_use_uart2()?ARRAY_SIZE(config_MB_Base_uart2):ARRAY_SIZE(config_MB_Base_uart1);
+                if (!_configure_config_set(list, list_length, CONFIG_RTK_MOVBASE)) {
+                    _next_message--;
+                }
+            }
+            if (role == AP_GPS::GPS_ROLE_MB_ROVER) {
+                const config_list *list = mb_use_uart2()?config_MB_Rover_uart2:config_MB_Rover_uart1;
+                uint8_t list_length = mb_use_uart2()?ARRAY_SIZE(config_MB_Rover_uart2):ARRAY_SIZE(config_MB_Rover_uart1);
+                if (!_configure_config_set(list, list_length, CONFIG_RTK_MOVBASE)) {
+                    _next_message--;
+                }
+            }
+        }
+#endif
         break;
     default:
         // this case should never be reached, do a full reset if it is hit
@@ -228,126 +404,86 @@ AP_GPS_UBLOX::_request_next_config(void)
 void
 AP_GPS_UBLOX::_verify_rate(uint8_t msg_class, uint8_t msg_id, uint8_t rate) {
     uint8_t desired_rate;
-
+    uint32_t config_msg_id;
     switch(msg_class) {
     case CLASS_NAV:
         switch(msg_id) {
         case MSG_POSLLH:
             desired_rate = havePvtMsg ? 0 : RATE_POSLLH;
-            if(rate == desired_rate) {
-                _unconfigured_messages &= ~CONFIG_RATE_POSLLH;
-            } else {
-                _configure_message_rate(msg_class, msg_id, desired_rate);
-                _unconfigured_messages |= CONFIG_RATE_POSLLH;
-                _cfg_needs_save = true;
-            }
+            config_msg_id = CONFIG_RATE_POSLLH;
             break;
         case MSG_STATUS:
             desired_rate = havePvtMsg ? 0 : RATE_STATUS;
-            if(rate == desired_rate) {
-                _unconfigured_messages &= ~CONFIG_RATE_STATUS;
-            } else {
-                _configure_message_rate(msg_class, msg_id, desired_rate);
-                _unconfigured_messages |= CONFIG_RATE_STATUS;
-                _cfg_needs_save = true;
-            }
+            config_msg_id = CONFIG_RATE_STATUS;
             break;
         case MSG_SOL:
             desired_rate = havePvtMsg ? 0 : RATE_SOL;
-            if(rate == desired_rate) {
-                _unconfigured_messages &= ~CONFIG_RATE_SOL;
-            } else {
-                _configure_message_rate(msg_class, msg_id, desired_rate);
-                _unconfigured_messages |= CONFIG_RATE_SOL;
-                _cfg_needs_save = true;
-            }
+            config_msg_id = CONFIG_RATE_SOL;
             break;
         case MSG_PVT:
-            if(rate == RATE_PVT) {
-                _unconfigured_messages &= ~CONFIG_RATE_PVT;
-            } else {
-                _configure_message_rate(msg_class, msg_id, RATE_PVT);
-                _unconfigured_messages |= CONFIG_RATE_PVT;
-                _cfg_needs_save = true;
-            }
+            desired_rate = RATE_PVT;
+            config_msg_id = CONFIG_RATE_PVT;
             break;
         case MSG_TIMEGPS:
-            if(rate == RATE_TIMEGPS) {
-                _unconfigured_messages &= ~CONFIG_RATE_TIMEGPS;
-            } else {
-                _configure_message_rate(msg_class, msg_id, RATE_TIMEGPS);
-                _unconfigured_messages |= CONFIG_RATE_TIMEGPS;
-                _cfg_needs_save = true;
-            }
+            desired_rate = RATE_TIMEGPS;
+            config_msg_id = CONFIG_RATE_TIMEGPS;
             break;
         case MSG_VELNED:
             desired_rate = havePvtMsg ? 0 : RATE_VELNED;
-            if(rate == desired_rate) {
-                _unconfigured_messages &= ~CONFIG_RATE_VELNED;
-            } else {
-                _configure_message_rate(msg_class, msg_id, desired_rate);
-                _unconfigured_messages |= CONFIG_RATE_VELNED;
-                _cfg_needs_save = true;
-            }
+            config_msg_id = CONFIG_RATE_VELNED;
             break;
         case MSG_DOP:
-            if(rate == RATE_DOP) {
-                _unconfigured_messages &= ~CONFIG_RATE_DOP;
-            } else {
-                _configure_message_rate(msg_class, msg_id, RATE_DOP);
-                _unconfigured_messages |= CONFIG_RATE_DOP;
-                _cfg_needs_save = true;
-            }
+            desired_rate = RATE_DOP;
+            config_msg_id = CONFIG_RATE_DOP;
             break;
+        default:
+            return;
         }
         break;
     case CLASS_MON:
         switch(msg_id) {
         case MSG_MON_HW:
-            if(rate == RATE_HW) {
-                _unconfigured_messages &= ~CONFIG_RATE_MON_HW;
-            } else {
-                _configure_message_rate(msg_class, msg_id, RATE_HW);
-                _unconfigured_messages |= CONFIG_RATE_MON_HW;
-                _cfg_needs_save = true;
-            }
+            desired_rate = RATE_HW;
+            config_msg_id = CONFIG_RATE_MON_HW;
             break;
         case MSG_MON_HW2:
-            if(rate == RATE_HW2) {
-                _unconfigured_messages &= ~CONFIG_RATE_MON_HW2;
-            } else {
-                _configure_message_rate(msg_class, msg_id, RATE_HW2);
-                _unconfigured_messages |= CONFIG_RATE_MON_HW2;
-                _cfg_needs_save = true;
-            }
+            desired_rate = RATE_HW2;
+            config_msg_id = CONFIG_RATE_MON_HW2;
             break;
+        default:
+            return;
         }
         break;
 #if UBLOX_RXM_RAW_LOGGING
     case CLASS_RXM:
         switch(msg_id) {
         case MSG_RXM_RAW:
-            if(rate == gps._raw_data) {
-                _unconfigured_messages &= ~CONFIG_RATE_RAW;
-            } else {
-                _configure_message_rate(msg_class, msg_id, gps._raw_data);
-                _unconfigured_messages |= CONFIG_RATE_RAW;
-                _cfg_needs_save = true;
-            }
+            desired_rate = gps._raw_data;
+            config_msg_id = CONFIG_RATE_RAW;
             break;
         case MSG_RXM_RAWX:
-            if(rate == gps._raw_data) {
-                _unconfigured_messages &= ~CONFIG_RATE_RAW;
-            } else {
-                _configure_message_rate(msg_class, msg_id, gps._raw_data);
-                _unconfigured_messages |= CONFIG_RATE_RAW;
-                _cfg_needs_save = true;
-            }
+            desired_rate = gps._raw_data;
+            config_msg_id = CONFIG_RATE_RAW;
             break;
+        default:
+            return;
         }
         break;
 #endif // UBLOX_RXM_RAW_LOGGING
+    default:
+        return;
     }
+
+    if (rate == desired_rate) {
+        // coming in at correct rate; mark as configured
+        _unconfigured_messages &= ~config_msg_id;
+        return;
+    }
+
+    // coming in at wrong rate; try to configure it
+    _configure_message_rate(msg_class, msg_id, desired_rate);
+    _unconfigured_messages |= config_msg_id;
+    _cfg_needs_save = true;
 }
 
 // Requests the ublox driver to identify what port we are using to communicate
@@ -374,8 +510,6 @@ AP_GPS_UBLOX::_request_port(void)
 bool
 AP_GPS_UBLOX::read(void)
 {
-    uint8_t data;
-    int16_t numc;
     bool parsed = false;
     uint32_t millis_now = AP_HAL::millis();
 
@@ -404,11 +538,32 @@ AP_GPS_UBLOX::read(void)
         }
     }
 
-    numc = port->available();
-    for (int16_t i = 0; i < numc; i++) {        // Process bytes received
+    const uint16_t numc = MIN(port->available(), 8192U);
+    for (uint16_t i = 0; i < numc; i++) {        // Process bytes received
 
         // read the next byte
-        data = port->read();
+        const int16_t rdata = port->read();
+        if (rdata < 0) {
+            break;
+        }
+        const uint8_t data = rdata;
+#if AP_GPS_DEBUG_LOGGING_ENABLED
+        log_data(&data, 1);
+#endif
+
+#if GPS_MOVING_BASELINE
+        if (rtcm3_parser) {
+            if (rtcm3_parser->read(data)) {
+                // we've found a RTCMv3 packet. We stop parsing at
+                // this point and reset u-blox parse state. We need to
+                // stop parsing to give the higher level driver a
+                // chance to send the RTCMv3 packet to another (rover)
+                // GPS
+                _step = 0;
+                break;
+            }
+        }
+#endif
 
 	reset:
         switch(_step) {
@@ -506,6 +661,12 @@ AP_GPS_UBLOX::read(void)
                 break;                                                  // bad checksum
             }
 
+#if GPS_MOVING_BASELINE
+            if (rtcm3_parser) {
+                // this is a uBlox packet, discard any partial RTCMv3 state
+                rtcm3_parser->reset();
+            }
+#endif
             if (_parse_gps()) {
                 parsed = true;
             }
@@ -518,12 +679,12 @@ AP_GPS_UBLOX::read(void)
 // Private Methods /////////////////////////////////////////////////////////////
 void AP_GPS_UBLOX::log_mon_hw(void)
 {
-#ifndef HAL_NO_LOGGING
+#if HAL_LOGGING_ENABLED
     if (!should_log()) {
         return;
     }
     struct log_Ubx1 pkt = {
-        LOG_PACKET_HEADER_INIT(_ubx_msg_log_index(LOG_GPS_UBX1_MSG)),
+        LOG_PACKET_HEADER_INIT(LOG_GPS_UBX1_MSG),
         time_us    : AP_HAL::micros64(),
         instance   : state.instance,
         noisePerMS : _buffer.mon_hw_60.noisePerMS,
@@ -544,13 +705,13 @@ void AP_GPS_UBLOX::log_mon_hw(void)
 
 void AP_GPS_UBLOX::log_mon_hw2(void)
 {
-#ifndef HAL_NO_LOGGING
+#if HAL_LOGGING_ENABLED
     if (!should_log()) {
         return;
     }
 
     struct log_Ubx2 pkt = {
-        LOG_PACKET_HEADER_INIT(_ubx_msg_log_index(LOG_GPS_UBX2_MSG)),
+        LOG_PACKET_HEADER_INIT(LOG_GPS_UBX2_MSG),
         time_us   : AP_HAL::micros64(),
         instance  : state.instance,
         ofsI      : _buffer.mon_hw2.ofsI,
@@ -565,7 +726,7 @@ void AP_GPS_UBLOX::log_mon_hw2(void)
 #if UBLOX_RXM_RAW_LOGGING
 void AP_GPS_UBLOX::log_rxm_raw(const struct ubx_rxm_raw &raw)
 {
-#ifndef HAL_NO_LOGGING
+#if HAL_LOGGING_ENABLED
     if (!should_log()) {
         return;
     }
@@ -593,7 +754,7 @@ void AP_GPS_UBLOX::log_rxm_raw(const struct ubx_rxm_raw &raw)
 
 void AP_GPS_UBLOX::log_rxm_rawx(const struct ubx_rxm_rawx &raw)
 {
-#ifndef HAL_NO_LOGGING
+#if HAL_LOGGING_ENABLED
     if (!should_log()) {
         return;
     }
@@ -645,6 +806,46 @@ void AP_GPS_UBLOX::unexpected_message(void)
         Debug("Disabling message 0x%02x 0x%02x", (unsigned)_class, (unsigned)_msg_id);
         _configure_message_rate(_class, _msg_id, 0);
     }
+}
+
+// return size of a config key, or 0 if unknown
+uint8_t AP_GPS_UBLOX::config_key_size(ConfigKey key) const
+{
+    // step over the value
+    const uint8_t key_size = (uint32_t(key) >> 28) & 0x07; // mask off the storage size
+    switch (key_size) {
+    case 0x1: // bit
+    case 0x2: // byte
+        return 1;
+    case 0x3: // 2 bytes
+        return 2;
+    case 0x4: // 4 bytes
+        return 4;
+    case 0x5: // 8 bytes
+        return 8;
+    default:
+        break;
+    }
+    // invalid
+    return 0;
+}
+
+/*
+  find index of a config key in the active_config list, or -1
+ */
+int8_t AP_GPS_UBLOX::find_active_config_index(ConfigKey key) const
+{
+#if GPS_MOVING_BASELINE
+    if (active_config.list == nullptr) {
+        return -1;
+    }
+    for (uint8_t i=0; i<active_config.count; i++) {
+        if (key == active_config.list[i].key) {
+            return (int8_t)i;
+        }
+    }
+#endif
+    return -1;
 }
 
 bool
@@ -759,16 +960,21 @@ AP_GPS_UBLOX::_parse_gps(void)
                         gnssCount++;
                     }
                 }
-
                 for(int i = 0; i < _buffer.gnss.numConfigBlocks; i++) {
-                    // Reserve an equal portion of channels for all enabled systems
+                    // Reserve an equal portion of channels for all enabled systems that supports it
                     if(gps._gnss_mode[state.instance] & (1 << _buffer.gnss.configBlock[i].gnssId)) {
-                        if(GNSS_SBAS !=_buffer.gnss.configBlock[i].gnssId) {
+                        if(GNSS_SBAS !=_buffer.gnss.configBlock[i].gnssId && (_hardware_generation > UBLOX_M8 || GNSS_GALILEO !=_buffer.gnss.configBlock[i].gnssId)) {
                             _buffer.gnss.configBlock[i].resTrkCh = (_buffer.gnss.numTrkChHw - 3) / (gnssCount * 2);
                             _buffer.gnss.configBlock[i].maxTrkCh = _buffer.gnss.numTrkChHw;
                         } else {
-                            _buffer.gnss.configBlock[i].resTrkCh = 1;
-                            _buffer.gnss.configBlock[i].maxTrkCh = 3;
+                            if(GNSS_SBAS ==_buffer.gnss.configBlock[i].gnssId) {
+                                _buffer.gnss.configBlock[i].resTrkCh = 1;
+                                _buffer.gnss.configBlock[i].maxTrkCh = 3;
+                            }
+                            if(GNSS_GALILEO ==_buffer.gnss.configBlock[i].gnssId) {
+                                _buffer.gnss.configBlock[i].resTrkCh = (_buffer.gnss.numTrkChHw - 3) / (gnssCount * 2);
+                                _buffer.gnss.configBlock[i].maxTrkCh = 8; //Per the M8 receiver description UBX-13003221 - R16, 4.1.1.3 it is not recommended to set the number of galileo channels higher then eigh
+                            }
                         }
                         _buffer.gnss.configBlock[i].flags = _buffer.gnss.configBlock[i].flags | 0x00000001;
                     } else {
@@ -791,7 +997,7 @@ AP_GPS_UBLOX::_parse_gps(void)
 #endif
 
         case MSG_CFG_SBAS:
-            if (gps._sbas_mode != 2) {
+            if (gps._sbas_mode != AP_GPS::SBAS_Mode::DoNotChange) {
 	        Debug("Got SBAS settings %u %u %u 0x%x 0x%x\n", 
                       (unsigned)_buffer.sbas.mode,
                       (unsigned)_buffer.sbas.usage,
@@ -849,8 +1055,12 @@ AP_GPS_UBLOX::_parse_gps(void)
                   (unsigned)_buffer.nav_tp5.version,
                   (unsigned)_buffer.nav_tp5.flags,
                   (unsigned)_buffer.nav_tp5.freqPeriod);
+#ifdef HAL_GPIO_PPS
+            hal.gpio->attach_interrupt(HAL_GPIO_PPS, FUNCTOR_BIND_MEMBER(&AP_GPS_UBLOX::pps_interrupt, void, uint8_t, bool, uint32_t), AP_HAL::GPIO::INTERRUPT_FALLING);
+#endif
             const uint16_t desired_flags = 0x003f;
-            const uint16_t desired_period_hz = 1;
+            const uint16_t desired_period_hz = _pps_freq;
+
             if (_buffer.nav_tp5.flags != desired_flags ||
                 _buffer.nav_tp5.freqPeriod != desired_period_hz) {
                 _buffer.nav_tp5.tpIdx = 0;
@@ -884,24 +1094,50 @@ AP_GPS_UBLOX::_parse_gps(void)
                 cfg_len -= 4;
                 cfg_data += 4;
                 switch (id) {
-                case ConfigKey::TMODE_MODE: {
-                    uint8_t mode = cfg_data[0];
-                    cfg_len -= 1;
-                    cfg_data += 1;
-                    if (mode != 0) {
-                        // ask for mode 0, to disable TIME mode
-                        mode = 0;
-                        _configure_valset(ConfigKey::TMODE_MODE, 1, &mode);
-                        _unconfigured_messages |= CONFIG_TMODE_MODE;
-                    } else {
-                        _unconfigured_messages &= ~CONFIG_TMODE_MODE;
+                    case ConfigKey::TMODE_MODE: {
+                        uint8_t mode = cfg_data[0];
+                        if (mode != 0) {
+                            // ask for mode 0, to disable TIME mode
+                            mode = 0;
+                            _configure_valset(ConfigKey::TMODE_MODE, &mode);
+                            _cfg_needs_save = true;
+                            _unconfigured_messages |= CONFIG_TMODE_MODE;
+                        } else {
+                            _unconfigured_messages &= ~CONFIG_TMODE_MODE;
+                        }
+                        break;
                     }
-                    break;
+                    default:
+                        break;
                 }
-                default:
-                    // we don't know the length so we stop parsing
+#if GPS_MOVING_BASELINE
+                // see if it is in active config list
+                int8_t cfg_idx = find_active_config_index(id);
+                if (cfg_idx >= 0) {
+                    const uint8_t key_size = config_key_size(id);
+                    if (cfg_len < key_size ||
+                        memcmp(&active_config.list[cfg_idx].value, cfg_data, key_size) != 0) {
+                        _configure_valset(id, &active_config.list[cfg_idx].value);
+                        _unconfigured_messages |= active_config.unconfig_bit;
+                        active_config.done_mask &= ~(1U << cfg_idx);
+                        _cfg_needs_save = true;
+                    } else {
+                        active_config.done_mask |= (1U << cfg_idx);
+                        if (active_config.done_mask == (1U<<active_config.count)-1) {
+                            // all done!
+                            _unconfigured_messages &= ~active_config.unconfig_bit;
+                        }
+                    }
+                }
+#endif // GPS_MOVING_BASELINE
+
+                // step over the value
+                uint8_t step_size = config_key_size(id);
+                if (step_size == 0) {
                     return false;
                 }
+                cfg_len -= step_size;
+                cfg_data += step_size;
             }
         }
         }
@@ -928,11 +1164,24 @@ AP_GPS_UBLOX::_parse_gps(void)
                                              state.instance + 1,
                                              _version.hwVersion,
                                              _version.swVersion);
-            // check for F9. The F9 does not respond to SVINFO, so we need to use MON_VER
-            // for hardware generation
+            // check for F9 and M9. The F9 does not respond to SVINFO,
+            // so we need to use MON_VER for hardware generation
             if (strncmp(_version.hwVersion, "00190000", 8) == 0) {
-                _hardware_generation = UBLOX_F9;
+                if (strncmp(_version.swVersion, "EXT CORE 1", 10) == 0) {
+                    // a F9
+                    if (_hardware_generation != UBLOX_F9) {
+                        // need to ensure time mode is correctly setup on F9
+                        _unconfigured_messages |= CONFIG_TMODE_MODE;
+                    }
+                    _hardware_generation = UBLOX_F9;
+                }
+                if (strncmp(_version.swVersion, "EXT CORE 4", 10) == 0) {
+                    // a M9
+                    _hardware_generation = UBLOX_M9;
+                }
             }
+            // none of the 9 series support the SOL message
+            _unconfigured_messages &= ~CONFIG_RATE_SOL;
             break;
         default:
             unexpected_message();
@@ -1065,10 +1314,10 @@ AP_GPS_UBLOX::_parse_gps(void)
         state.hdop = 130;
 #endif
         break;
+
+#if GPS_MOVING_BASELINE
     case MSG_RELPOSNED:
         {
-            const Vector3f &offset0 = gps._antenna_offset[0].get();
-            const Vector3f &offset1 = gps._antenna_offset[1].get();
             // note that we require the yaw to come from a fixed solution, not a float solution
             // yaw from a float solution would only be acceptable with a very large separation between
             // GPS modules
@@ -1081,43 +1330,41 @@ AP_GPS_UBLOX::_parse_gps(void)
                                           static_cast<uint32_t>(RELPOSNED::refObsMiss) |
                                           static_cast<uint32_t>(RELPOSNED::carrSolnFloat);
 
-            const float offset_dist = (offset0 - offset1).length();
-            const float rel_dist = _buffer.relposned.relPosLength * 1.0e-2;
-            const float strict_length_error_allowed = 0.2; // allow for up to 20% error
-            const float min_separation = 0.05;
+            _check_new_itow(_buffer.relposned.iTOW);
+            if (_buffer.relposned.iTOW != _last_relposned_itow+200) {
+                // useful for looking at packet loss on links
+                MB_Debug("RELPOSNED ITOW %u %u\n", unsigned(_buffer.relposned.iTOW), unsigned(_last_relposned_itow));
+            }
+            _last_relposned_itow = _buffer.relposned.iTOW;
+            MB_Debug("RELPOSNED flags: %lx valid: %lx invalid: %lx\n", _buffer.relposned.flags, valid_mask, invalid_mask);
             if (((_buffer.relposned.flags & valid_mask) == valid_mask) &&
-                ((_buffer.relposned.flags & invalid_mask) == 0) &&
-                rel_dist > min_separation &&
-                offset_dist > min_separation &&
-                fabsf(offset_dist - rel_dist) / MIN(offset_dist, rel_dist) < strict_length_error_allowed) {
-                float rotation_offset_rad;
-                if (offset0.is_zero()) {
-                    rotation_offset_rad = Vector2f(offset1.x, offset1.y).angle();
-                } else if (offset1.is_zero()) {
-                    rotation_offset_rad = Vector2f(offset0.x, offset0.y).angle();
-                } else {
-                    const Vector3f diff = offset0 - offset1;
-                    rotation_offset_rad = Vector2f(diff.x, diff.y).angle();
+                ((_buffer.relposned.flags & invalid_mask) == 0)) {
+                if (calculate_moving_base_yaw(_buffer.relposned.relPosHeading * 1e-5,
+                                          _buffer.relposned.relPosLength * 0.01,
+                                          _buffer.relposned.relPosD*0.01)) {
+                    state.have_gps_yaw_accuracy = true;
+                    state.gps_yaw_accuracy = _buffer.relposned.accHeading * 1e-5;
+                    _last_relposned_ms = AP_HAL::millis();
                 }
-                if (state.instance != 0) {
-                    rotation_offset_rad += M_PI;
-                }
-                state.gps_yaw = wrap_360(_buffer.relposned.relPosHeading * 1e-5 + degrees(rotation_offset_rad));
-                state.have_gps_yaw = true;
-                state.gps_yaw_accuracy = _buffer.relposned.accHeading * 1e-5;
-                state.have_gps_yaw_accuracy = true;
+                state.relPosHeading = _buffer.relposned.relPosHeading * 1e-5;
+                state.relPosLength  = _buffer.relposned.relPosLength * 0.01;
+                state.relPosD       = _buffer.relposned.relPosD * 0.01;
+                state.accHeading    = _buffer.relposned.accHeading * 1e-5;
+                state.relposheading_ts = AP_HAL::millis();
             } else {
-                state.have_gps_yaw = false;
                 state.have_gps_yaw_accuracy = false;
             }
         }
         break;
+#endif // GPS_MOVING_BASELINE
+
     case MSG_PVT:
         Debug("MSG_PVT");
 
         havePvtMsg = true;
         // position
         _check_new_itow(_buffer.pvt.itow);
+        _last_pvt_itow = _buffer.pvt.itow;
         _last_pos_time        = _buffer.pvt.itow;
         state.location.lng    = _buffer.pvt.lon;
         state.location.lat    = _buffer.pvt.lat;
@@ -1221,7 +1468,7 @@ AP_GPS_UBLOX::_parse_gps(void)
         state.velocity.y = _buffer.velned.ned_east * 0.01f;
         state.velocity.z = _buffer.velned.ned_down * 0.01f;
         state.ground_course = wrap_360(degrees(atan2f(state.velocity.y, state.velocity.x)));
-        state.ground_speed = norm(state.velocity.y, state.velocity.x);
+        state.ground_speed = state.velocity.xy().length();
         state.have_speed_accuracy = true;
         state.speed_accuracy = _buffer.velned.speed_accuracy*0.01f;
 #if UBLOX_FAKE_3DLOCK
@@ -1266,6 +1513,19 @@ AP_GPS_UBLOX::_parse_gps(void)
         return false;
     }
 
+    if (state.have_gps_yaw) {
+        // when we are a rover we want to ensure we have both the new
+        // PVT and the new RELPOSNED message so that we give a
+        // consistent view
+        if (AP_HAL::millis() - _last_relposned_ms > 400) {
+            // we have stopped receiving valid RELPOSNED messages, disable yaw reporting
+            state.have_gps_yaw = false;
+        } else if (_last_relposned_itow != _last_pvt_itow) {
+            // wait until ITOW matches
+            return false;
+        }
+    }
+
     // we only return true when we get new position and speed data
     // this ensures we don't use stale data
     if (_new_position && _new_speed && _last_vel_time == _last_pos_time) {
@@ -1274,6 +1534,24 @@ AP_GPS_UBLOX::_parse_gps(void)
     }
     return false;
 }
+
+/*
+ *  handle pps interrupt
+ */
+#ifdef HAL_GPIO_PPS
+void
+AP_GPS_UBLOX::pps_interrupt(uint8_t pin, bool high, uint32_t timestamp_us)
+{
+    _last_pps_time_us = timestamp_us;
+}
+
+void
+AP_GPS_UBLOX::set_pps_desired_freq(uint8_t freq)
+{
+    _pps_freq = freq;
+    _unconfigured_messages |= CONFIG_TP5;
+}
+#endif
 
 
 // UBlox auto configuration
@@ -1296,7 +1574,7 @@ AP_GPS_UBLOX::_update_checksum(uint8_t *data, uint16_t len, uint8_t &ck_a, uint8
  *  send a ublox message
  */
 bool
-AP_GPS_UBLOX::_send_message(uint8_t msg_class, uint8_t msg_id, void *msg, uint16_t size)
+AP_GPS_UBLOX::_send_message(uint8_t msg_class, uint8_t msg_id, const void *msg, uint16_t size)
 {
     if (port->txspace() < (sizeof(struct ubx_header) + 2 + size)) {
         return false;
@@ -1362,11 +1640,12 @@ AP_GPS_UBLOX::_configure_message_rate(uint8_t msg_class, uint8_t msg_id, uint8_t
  *  configure F9 based key/value pair - VALSET
  */
 bool
-AP_GPS_UBLOX::_configure_valset(ConfigKey key, const uint8_t len, const uint8_t *value)
+AP_GPS_UBLOX::_configure_valset(ConfigKey key, const void *value)
 {
-    if (_hardware_generation < UBLOX_F9) {
+    if (!supports_F9_config()) {
         return false;
     }
+    const uint8_t len = config_key_size(key);
     struct ubx_cfg_valset msg {};
     uint8_t buf[sizeof(msg)+len];
     if (port->txspace() < (uint16_t)(sizeof(struct ubx_header)+sizeof(buf)+2)) {
@@ -1388,7 +1667,7 @@ AP_GPS_UBLOX::_configure_valset(ConfigKey key, const uint8_t len, const uint8_t 
 bool
 AP_GPS_UBLOX::_configure_valget(ConfigKey key)
 {
-    if (_hardware_generation < UBLOX_F9) {
+    if (!supports_F9_config()) {
         return false;
     }
     struct {
@@ -1405,16 +1684,46 @@ AP_GPS_UBLOX::_configure_valget(ConfigKey key)
 }
 
 /*
+ *  configure F9 based key/value pair for a complete config list
+ */
+bool
+AP_GPS_UBLOX::_configure_config_set(const config_list *list, uint8_t count, uint32_t unconfig_bit)
+{
+#if GPS_MOVING_BASELINE
+    active_config.list = list;
+    active_config.count = count;
+    active_config.done_mask = 0;
+    active_config.unconfig_bit = unconfig_bit;
+
+    uint8_t buf[sizeof(ubx_cfg_valget)+count*sizeof(ConfigKey)];
+    struct ubx_cfg_valget msg {};
+    if (port->txspace() < (uint16_t)(sizeof(struct ubx_header)+sizeof(buf)+2)) {
+        return false;
+    }
+    msg.version = 0;
+    msg.layers = 0; // ram
+    memcpy(buf, &msg, sizeof(msg));
+    for (uint8_t i=0; i<count; i++) {
+        memcpy(&buf[sizeof(msg)+i*sizeof(ConfigKey)], &list[i].key, sizeof(ConfigKey));
+    }
+    return _send_message(CLASS_CFG, MSG_CFG_VALGET, buf, sizeof(buf));
+#else
+    return false;
+#endif
+}
+
+/*
  * save gps configurations to non-volatile memory sent until the call of
  * this message
  */
 void
 AP_GPS_UBLOX::_save_cfg()
 {
-    ubx_cfg_cfg save_cfg;
-    save_cfg.clearMask = 0;
-    save_cfg.saveMask = SAVE_CFG_ALL;
-    save_cfg.loadMask = 0;
+    static const ubx_cfg_cfg save_cfg {
+      clearMask: 0,
+      saveMask: SAVE_CFG_ALL,
+      loadMask: 0
+    };
     _send_message(CLASS_CFG, MSG_CFG_CFG, &save_cfg, sizeof(save_cfg));
     _last_cfg_sent_time = AP_HAL::millis();
     _num_cfg_save_tries++;
@@ -1517,7 +1826,9 @@ static const char *reasons[] = {"navigation rate",
                                 "SBAS settings",
                                 "PVT rate",
                                 "time pulse settings",
-                                "TIMEGPS rate"};
+                                "TIMEGPS rate",
+                                "Time mode settings",
+                                "RTK MB"};
 
 static_assert((1 << ARRAY_SIZE(reasons)) == CONFIG_LAST, "UBLOX: Missing configuration description");
 
@@ -1543,7 +1854,7 @@ bool AP_GPS_UBLOX::get_lag(float &lag_sec) const
         // always bail out in this case, it's used to indicate we have yet to receive a valid
         // hardware generation, however the user may have inhibited us detecting the generation
         // so if we aren't allowed to do configuration, we will accept this as the default delay
-        return gps._auto_config != AP_GPS::GPS_AUTO_CONFIG_ENABLE;
+        return gps._auto_config == AP_GPS::GPS_AUTO_CONFIG_DISABLE;
     case UBLOX_5:
     case UBLOX_6:
     default:
@@ -1555,9 +1866,19 @@ bool AP_GPS_UBLOX::get_lag(float &lag_sec) const
         lag_sec = 0.12f;
         break;
     case UBLOX_F9:
+    case UBLOX_M9:
         // F9 lag not verified yet from flight log, but likely to be at least
         // as good as M8
         lag_sec = 0.12f;
+#if GPS_MOVING_BASELINE
+        if (role == AP_GPS::GPS_ROLE_MB_BASE ||
+            role == AP_GPS::GPS_ROLE_MB_ROVER) {
+            // the moving baseline rover will lag about 40ms from the
+            // base. We need to provide the more conservative value to
+            // ensure that the EKF allocates a larger enough buffer
+            lag_sec += 0.04;
+        }
+#endif
         break;
     };
     return true;
@@ -1565,7 +1886,7 @@ bool AP_GPS_UBLOX::get_lag(float &lag_sec) const
 
 void AP_GPS_UBLOX::Write_AP_Logger_Log_Startup_messages() const
 {
-#ifndef HAL_NO_LOGGING
+#if HAL_LOGGING_ENABLED
     AP_GPS_Backend::Write_AP_Logger_Log_Startup_messages();
 
     if (_have_version) {
@@ -1581,4 +1902,56 @@ void AP_GPS_UBLOX::Write_AP_Logger_Log_Startup_messages() const
 void AP_GPS_UBLOX::_check_new_itow(uint32_t itow)
 {
     check_new_itow(itow, _payload_length + sizeof(ubx_header) + 2);
+}
+
+// support for retrieving RTCMv3 data from a moving baseline base
+bool AP_GPS_UBLOX::get_RTCMV3(const uint8_t *&bytes, uint16_t &len)
+{
+#if GPS_MOVING_BASELINE
+    if (rtcm3_parser) {
+        len = rtcm3_parser->get_len(bytes);
+        return len > 0;
+    }
+#endif
+    return false;
+}
+
+// clear previous RTCM3 packet
+void AP_GPS_UBLOX::clear_RTCMV3(void)
+{
+#if GPS_MOVING_BASELINE
+    if (rtcm3_parser) {
+        rtcm3_parser->clear_packet();
+    }
+#endif
+}
+
+// ublox specific healthy checks
+bool AP_GPS_UBLOX::is_healthy(void) const
+{
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    if (gps._auto_config == AP_GPS::GPS_AUTO_CONFIG_DISABLE) {
+        // allow for fake ublox moving baseline
+        return true;
+    }
+#endif
+#if GPS_MOVING_BASELINE
+    if ((role == AP_GPS::GPS_ROLE_MB_BASE ||
+        role == AP_GPS::GPS_ROLE_MB_ROVER) &&
+        !supports_F9_config()) {
+        // need F9 or above for moving baseline
+        return false;
+    }
+    if (role == AP_GPS::GPS_ROLE_MB_BASE && rtcm3_parser == nullptr && !mb_use_uart2()) {
+        // we haven't initialised RTCMv3 parser
+        return false;
+    }
+#endif
+    return true;
+}
+
+// return true if GPS is capable of F9 config
+bool AP_GPS_UBLOX::supports_F9_config(void) const
+{
+    return _hardware_generation == UBLOX_F9 && _hardware_generation != UBLOX_UNKNOWN_HARDWARE_GENERATION;
 }

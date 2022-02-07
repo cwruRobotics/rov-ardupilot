@@ -2,7 +2,7 @@
 
 /*
  * Function to update various parameters in flight using the ch6 tuning knob
- * This should not be confused with the AutoTune feature which can bve found in control_autotune.cpp
+ * This should not be confused with the AutoTune feature which can be found in control_autotune.cpp
  */
 
 // tuning - updates parameters based on the ch6 tuning knob's position
@@ -72,7 +72,7 @@ void Copter::tuning()
         break;
 
     case TUNING_THROTTLE_RATE_KP:
-        pos_control->get_vel_z_p().kP(tuning_value);
+        pos_control->get_vel_z_pid().kP(tuning_value);
         break;
 
     case TUNING_ACCEL_Z_KP:
@@ -104,15 +104,19 @@ void Copter::tuning()
         wp_nav->set_speed_xy(tuning_value);
         break;
 
-    // Acro roll pitch gain
-    case TUNING_ACRO_RP_KP:
-        g.acro_rp_p = tuning_value;
+#if MODE_ACRO_ENABLED == ENABLED || MODE_SPORT_ENABLED == ENABLED
+    // Acro roll pitch rates
+    case TUNING_ACRO_RP_RATE:
+        g2.acro_rp_rate = tuning_value;
         break;
+#endif
 
-    // Acro yaw gain
-    case TUNING_ACRO_YAW_KP:
-        g.acro_yaw_p = tuning_value;
+#if MODE_ACRO_ENABLED == ENABLED || MODE_DRIFT_ENABLED == ENABLED
+    // Acro yaw rate
+    case TUNING_ACRO_YAW_RATE:
+        g2.acro_y_rate = tuning_value;
         break;
+#endif
 
 #if FRAME_CONFIG == HELI_FRAME
     case TUNING_HELI_EXTERNAL_GYRO:
@@ -139,44 +143,6 @@ void Copter::tuning()
 #if MODE_CIRCLE_ENABLED == ENABLED
     case TUNING_CIRCLE_RATE:
         circle_nav->set_rate(tuning_value);
-        break;
-#endif
-
-#if RANGEFINDER_ENABLED == ENABLED
-    case TUNING_RANGEFINDER_GAIN:
-        // set rangefinder gain
-        g.rangefinder_gain.set(tuning_value);
-        break;
-#endif
-
-#if 0
-        // disabled for now - we need accessor functions
-    case TUNING_EKF_VERTICAL_POS:
-        // Tune the EKF that is being used
-        // EKF's baro vs accel (higher rely on accels more, baro impact is reduced)
-        if (!ahrs.get_NavEKF2().enabled()) {
-            ahrs.get_NavEKF()._gpsVertPosNoise = tuning_value;
-        } else {
-            ahrs.get_NavEKF2()._gpsVertPosNoise = tuning_value;
-        }
-        break;
-
-    case TUNING_EKF_HORIZONTAL_POS:
-        // EKF's gps vs accel (higher rely on accels more, gps impact is reduced)
-        if (!ahrs.get_NavEKF2().enabled()) {
-            ahrs.get_NavEKF()._gpsHorizPosNoise = tuning_value;
-        } else {
-            ahrs.get_NavEKF2()._gpsHorizPosNoise = tuning_value;
-        }
-        break;
-
-    case TUNING_EKF_ACCEL_NOISE:
-        // EKF's accel noise (lower means trust accels more, gps & baro less)
-        if (!ahrs.get_NavEKF2().enabled()) {
-            ahrs.get_NavEKF()._accNoise = tuning_value;
-        } else {
-            ahrs.get_NavEKF2()._accNoise = tuning_value;
-        }
         break;
 #endif
 
@@ -217,16 +183,6 @@ void Copter::tuning()
      case TUNING_RATE_YAW_FILT:
          attitude_control->get_rate_yaw_pid().filt_E_hz(tuning_value);
          break;
-
-#if WINCH_ENABLED == ENABLED
-     case TUNING_WINCH:
-         // add small deadzone
-         if (fabsf(tuning_value) < 0.05f) {
-             tuning_value = 0;
-         }
-         g2.winch.set_desired_rate(tuning_value);
-         break;
-#endif
 
      case TUNING_SYSTEM_ID_MAGNITUDE:
 #if MODE_SYSTEMID_ENABLED == ENABLED

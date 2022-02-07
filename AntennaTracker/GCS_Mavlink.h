@@ -18,6 +18,7 @@ protected:
 
     uint8_t sysid_my_gcs() const override;
 
+    MAV_RESULT handle_command_component_arm_disarm(const mavlink_command_long_t &packet) override;
     MAV_RESULT _handle_command_preflight_calibration_baro() override;
     MAV_RESULT handle_command_long_packet(const mavlink_command_long_t &packet) override;
 
@@ -38,10 +39,12 @@ private:
     void handleMessage(const mavlink_message_t &msg) override;
     bool handle_guided_request(AP_Mission::Mission_Command &cmd) override;
     void handle_change_alt_request(AP_Mission::Mission_Command &cmd) override;
+    void handle_set_attitude_target(const mavlink_message_t &msg);
+
     void send_global_position_int() override;
 
     MAV_MODE base_mode() const override;
-    MAV_STATE system_status() const override;
+    MAV_STATE vehicle_system_status() const override;
 
     bool waypoint_receiving;
 };

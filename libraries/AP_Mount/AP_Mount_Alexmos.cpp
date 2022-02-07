@@ -1,5 +1,5 @@
 #include "AP_Mount_Alexmos.h"
-#include <AP_GPS/AP_GPS.h>
+#if HAL_MOUNT_ENABLED
 #include <AP_SerialManager/AP_SerialManager.h>
 
 extern const AP_HAL::HAL& hal;
@@ -57,6 +57,26 @@ void AP_Mount_Alexmos::update()
             }
             break;
 
+        case MAV_MOUNT_MODE_HOME_LOCATION:
+            // constantly update the home location:
+            if (!AP::ahrs().home_is_set()) {
+                break;
+            }
+            _state._roi_target = AP::ahrs().get_home();
+            _state._roi_target_set = true;
+            if (calc_angle_to_roi_target(_angle_ef_target_rad, true, false)) {
+                control_axis(_angle_ef_target_rad, false);
+            }
+            break;
+
+        case MAV_MOUNT_MODE_SYSID_TARGET:
+            if (calc_angle_to_sysid_target(_angle_ef_target_rad,
+                                           true,
+                                           false)) {
+                control_axis(_angle_ef_target_rad, false);
+            }
+            break;
+
         default:
             // we do not know this mode so do nothing
             break;
@@ -84,7 +104,7 @@ void AP_Mount_Alexmos::send_mount_status(mavlink_channel_t chan)
     }
 
     get_angles();
-    mavlink_msg_mount_status_send(chan, 0, 0, _current_angle.y*100, _current_angle.x*100, _current_angle.z*100);
+    mavlink_msg_mount_status_send(chan, 0, 0, _current_angle.y*100, _current_angle.x*100, _current_angle.z*100, _state._mode);
 }
 
 /*
@@ -285,3 +305,4 @@ void AP_Mount_Alexmos::read_incoming()
         }
     }
 }
+#endif // HAL_MOUNT_ENABLED

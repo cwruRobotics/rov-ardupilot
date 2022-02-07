@@ -3,6 +3,7 @@
 #include "LoggerMessageWriter.h"
 
 #include <AP_InternalError/AP_InternalError.h>
+#include <AP_Scheduler/AP_Scheduler.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -44,18 +45,27 @@ const struct MultiplierStructure *AP_Logger_Backend::multiplier(uint8_t num) con
     return _front.multiplier(num);
 }
 
-AP_Logger_Backend::vehicle_startup_message_Writer AP_Logger_Backend::vehicle_message_writer() {
+AP_Logger_Backend::vehicle_startup_message_Writer AP_Logger_Backend::vehicle_message_writer() const {
     return _front._vehicle_messages;
 }
 
 void AP_Logger_Backend::periodic_10Hz(const uint32_t now)
 {
 }
+
 void AP_Logger_Backend::periodic_1Hz()
 {
+    if (_rotate_pending && !logging_enabled()) {
+        _rotate_pending = false;
+        // handle log rotation once we stop logging
+        stop_logging_async();
+    }
+    df_stats_log();
 }
+
 void AP_Logger_Backend::periodic_fullrate()
 {
+    push_log_blocks();
 }
 
 void AP_Logger_Backend::periodic_tasks()
@@ -74,8 +84,25 @@ void AP_Logger_Backend::periodic_tasks()
 
 void AP_Logger_Backend::start_new_log_reset_variables()
 {
+    _dropped = 0;
     _startup_messagewriter->reset();
     _front.backend_starting_new_log(this);
+    _log_file_size_bytes = 0;
+}
+
+// We may need to make sure data is loggable before starting the
+// EKF; when allow_start_ekf we should be able to log that data
+bool AP_Logger_Backend::allow_start_ekf() const
+{
+    if (!_startup_messagewriter->fmt_done()) {
+        return false;
+    }
+    // we need to push all startup messages out, or the code in
+    // WriteBlockCheckStartupMessages bites us.
+    if (!_startup_messagewriter->finished()) {
+        return false;
+    }
+    return true;
 }
 
 // this method can be overridden to do extra things with your buffer.
@@ -91,6 +118,7 @@ bool AP_Logger_Backend::WriteBlockCheckStartupMessages()
 #if APM_BUILD_TYPE(APM_BUILD_Replay)
     return true;
 #endif
+
     if (_startup_messagewriter->fmt_done()) {
         return true;
     }
@@ -122,6 +150,9 @@ bool AP_Logger_Backend::WriteBlockCheckStartupMessages()
 // source more messages from the startup message writer:
 void AP_Logger_Backend::WriteMoreStartupMessages()
 {
+#if APM_BUILD_TYPE(APM_BUILD_Replay)
+    return;
+#endif
 
     if (_startup_messagewriter->finished()) {
         return;
@@ -139,6 +170,11 @@ void AP_Logger_Backend::WriteMoreStartupMessages()
 
 bool AP_Logger_Backend::Write_Emit_FMT(uint8_t msg_type)
 {
+#if APM_BUILD_TYPE(APM_BUILD_Replay)
+    // sure, sure we did....
+    return true;
+#endif
+
     // get log structure from front end:
     char ls_name[LS_NAME_SIZE] = {};
     char ls_format[LS_FORMAT_SIZE] = {};
@@ -159,7 +195,7 @@ bool AP_Logger_Backend::Write_Emit_FMT(uint8_t msg_type)
         // this is a bug; we've been asked to write out the FMT
         // message for a msg_type, but the frontend can't supply the
         // required information
-        AP::internalerror().error(AP_InternalError::error_t::logger_missing_logstructure);
+        INTERNAL_ERROR(AP_InternalError::error_t::logger_missing_logstructure);
         return false;
     }
 
@@ -173,7 +209,7 @@ bool AP_Logger_Backend::Write_Emit_FMT(uint8_t msg_type)
     return true;
 }
 
-bool AP_Logger_Backend::Write(const uint8_t msg_type, va_list arg_list, bool is_critical)
+bool AP_Logger_Backend::Write(const uint8_t msg_type, va_list arg_list, bool is_critical, bool is_streaming)
 {
     // stack-allocate a buffer so we can WriteBlock(); this could be
     // 255 bytes!  If we were willing to lose the WriteBlock
@@ -189,12 +225,13 @@ bool AP_Logger_Backend::Write(const uint8_t msg_type, va_list arg_list, bool is_
         }
     }
     if (fmt == nullptr) {
-        AP::internalerror().error(AP_InternalError::error_t::logger_logwrite_missingfmt);
+        INTERNAL_ERROR(AP_InternalError::error_t::logger_logwrite_missingfmt);
         return false;
     }
     if (bufferspace_available() < msg_len) {
         return false;
     }
+
     uint8_t buffer[msg_len];
     uint8_t offset = 0;
     buffer[offset++] = HEAD_BYTE1;
@@ -278,15 +315,24 @@ bool AP_Logger_Backend::Write(const uint8_t msg_type, va_list arg_list, bool is_
             offset += sizeof(uint64_t);
             break;
         }
+        case 'a': {
+            int16_t *tmp = va_arg(arg_list, int16_t*);
+            const uint8_t bytes = 32*2;
+            memcpy(&buffer[offset], tmp, bytes);
+            offset += bytes;
+            break;
+        }
         }
         if (charlen != 0) {
             char *tmp = va_arg(arg_list, char*);
-            memcpy(&buffer[offset], tmp, charlen);
+            uint8_t len = strnlen(tmp, charlen);
+            memcpy(&buffer[offset], tmp, len);
+            memset(&buffer[offset+len], 0, charlen-len);
             offset += charlen;
         }
     }
 
-    return WritePrioritisedBlock(buffer, msg_len, is_critical);
+    return WritePrioritisedBlock(buffer, msg_len, is_critical, is_streaming);
 }
 
 bool AP_Logger_Backend::StartNewLogOK() const
@@ -342,16 +388,20 @@ void AP_Logger_Backend::validate_WritePrioritisedBlock(const void *pBuffer,
     }
     if (type_len != size) {
         char name[5] = {}; // get a null-terminated string
-        memcpy(name, s->name, 4);
+        if (s->name != nullptr) {
+            memcpy(name, s->name, 4);
+        } else {
+            strncpy(name, "?NM?", ARRAY_SIZE(name));
+        }
         AP_HAL::panic("Size mismatch for %u (%s) (expected=%u got=%u)\n",
                       type, name, type_len, size);
     }
 }
 #endif
 
-bool AP_Logger_Backend::WritePrioritisedBlock(const void *pBuffer, uint16_t size, bool is_critical)
+bool AP_Logger_Backend::WritePrioritisedBlock(const void *pBuffer, uint16_t size, bool is_critical, bool writev_streaming)
 {
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL && !APM_BUILD_TYPE(APM_BUILD_Replay)
     validate_WritePrioritisedBlock(pBuffer, size);
 #endif
     if (!ShouldLog(is_critical)) {
@@ -363,6 +413,14 @@ bool AP_Logger_Backend::WritePrioritisedBlock(const void *pBuffer, uint16_t size
     if (!WritesOK()) {
         return false;
     }
+
+    if (!is_critical && rate_limiter != nullptr) {
+        const uint8_t *msgbuf = (const uint8_t *)pBuffer;
+        if (!rate_limiter->should_log(msgbuf[2], writev_streaming)) {
+            return false;
+        }
+    }
+
     return _WritePrioritisedBlock(pBuffer, size, is_critical);
 }
 
@@ -379,6 +437,18 @@ bool AP_Logger_Backend::ShouldLog(bool is_critical)
         !hal.scheduler->in_main_thread()) {
         // only the main thread may write startup messages out
         return false;
+    }
+
+    if (_front.in_log_download() &&
+        _front._last_mavlink_log_transfer_message_handled_ms != 0) {
+        if (AP_HAL::millis() - _front._last_mavlink_log_transfer_message_handled_ms < 10000) {
+            if (!_front.vehicle_is_armed()) {
+                // user is transfering files via mavlink
+                return false;
+            }
+        } else {
+            _front._last_mavlink_log_transfer_message_handled_ms = 0;
+        }
     }
 
     if (is_critical && have_logged_armed && !_front._params.file_disarm_rot) {
@@ -399,6 +469,18 @@ bool AP_Logger_Backend::ShouldLog(bool is_critical)
     return true;
 }
 
+void AP_Logger_Backend::PrepForArming()
+{
+    if (_rotate_pending) {
+        _rotate_pending = false;
+        stop_logging();
+    }
+    if (logging_started()) {
+        return;
+    }
+    PrepForArming_start_logging();
+}
+
 bool AP_Logger_Backend::Write_MessageF(const char *fmt, ...)
 {
     char msg[65] {}; // sizeof(log_Message.msg) + null-termination
@@ -411,6 +493,7 @@ bool AP_Logger_Backend::Write_MessageF(const char *fmt, ...)
     return Write_Message(msg);
 }
 
+#if HAL_RALLY_ENABLED
 // Write rally points
 bool AP_Logger_Backend::Write_RallyPoint(uint8_t total,
                                          uint8_t sequence,
@@ -429,9 +512,176 @@ bool AP_Logger_Backend::Write_RallyPoint(uint8_t total,
 }
 
 // Write rally points
-void AP_Logger_Backend::Write_Rally()
+bool AP_Logger_Backend::Write_Rally()
 {
-    LoggerMessageWriter_WriteAllRallyPoints writer;
-    writer.set_logger_backend(this);
-    writer.process();
+    // kick off asynchronous write:
+    return _startup_messagewriter->writeallrallypoints();
+}
+#endif
+
+/*
+  convert a list entry number back into a log number (which can then
+  be converted into a filename).  A "list entry number" is a sequence
+  where the oldest log has a number of 1, the second-from-oldest 2,
+  and so on.  Thus the highest list entry number is equal to the
+  number of logs.
+*/
+uint16_t AP_Logger_Backend::log_num_from_list_entry(const uint16_t list_entry)
+{
+    uint16_t oldest_log = find_oldest_log();
+    if (oldest_log == 0) {
+        return 0;
+    }
+
+    uint32_t log_num = oldest_log + list_entry - 1;
+    if (log_num > MAX_LOG_FILES) {
+        log_num -= MAX_LOG_FILES;
+    }
+    return (uint16_t)log_num;
+}
+
+// find_oldest_log - find oldest log
+// returns 0 if no log was found
+uint16_t AP_Logger_Backend::find_oldest_log()
+{
+    if (_cached_oldest_log != 0) {
+        return _cached_oldest_log;
+    }
+
+    uint16_t last_log_num = find_last_log();
+    if (last_log_num == 0) {
+        return 0;
+    }
+
+    _cached_oldest_log = last_log_num - get_num_logs() + 1;
+
+    return _cached_oldest_log;
+}
+
+void AP_Logger_Backend::vehicle_was_disarmed()
+{
+    if (_front._params.file_disarm_rot) {
+        // rotate our log.  Closing the current one and letting the
+        // logging restart naturally based on log_disarmed should do
+        // the trick:
+        _rotate_pending = true;
+    }
+}
+
+// this sensor is enabled if we should be logging at the moment
+bool AP_Logger_Backend::logging_enabled() const
+{
+    if (hal.util->get_soft_armed() ||
+        _front.log_while_disarmed()) {
+        return true;
+    }
+    return false;
+}
+
+void AP_Logger_Backend::Write_AP_Logger_Stats_File(const struct df_stats &_stats)
+{
+    const struct log_DSF pkt {
+        LOG_PACKET_HEADER_INIT(LOG_DF_FILE_STATS),
+        time_us         : AP_HAL::micros64(),
+        dropped         : _dropped,
+        blocks          : _stats.blocks,
+        bytes           : _stats.bytes,
+        buf_space_min   : _stats.buf_space_min,
+        buf_space_max   : _stats.buf_space_max,
+        buf_space_avg   : (_stats.blocks) ? (_stats.buf_space_sigma / _stats.blocks) : 0,
+    };
+    WriteBlock(&pkt, sizeof(pkt));
+}
+
+void AP_Logger_Backend::df_stats_gather(const uint16_t bytes_written, uint32_t space_remaining)
+{
+    if (space_remaining < stats.buf_space_min) {
+        stats.buf_space_min = space_remaining;
+    }
+    if (space_remaining > stats.buf_space_max) {
+        stats.buf_space_max = space_remaining;
+    }
+    stats.buf_space_sigma += space_remaining;
+    stats.bytes += bytes_written;
+    _log_file_size_bytes += bytes_written;
+    stats.blocks++;
+}
+
+void AP_Logger_Backend::df_stats_clear() {
+    memset(&stats, '\0', sizeof(stats));
+    stats.buf_space_min = -1;
+}
+
+void AP_Logger_Backend::df_stats_log() {
+    Write_AP_Logger_Stats_File(stats);
+    df_stats_clear();
+}
+
+
+// class to handle rate limiting of log messages
+AP_Logger_RateLimiter::AP_Logger_RateLimiter(const AP_Logger &_front, const AP_Float &_limit_hz)
+    : front(_front), rate_limit_hz(_limit_hz)
+{
+}
+
+/*
+  return false if a streaming message should not be sent yet
+ */
+bool AP_Logger_RateLimiter::should_log_streaming(uint8_t msgid)
+{
+    if (rate_limit_hz <= 0) {
+        // no limiting (user changed the parameter)
+        return true;
+    }
+    const uint16_t now = AP_HAL::millis16();
+    uint16_t delta_ms = now - last_send_ms[msgid];
+    if (delta_ms < 1000.0 / rate_limit_hz.get()) {
+        // too soon
+        return false;
+    }
+    last_send_ms[msgid] = now;
+    return true;
+}
+
+/*
+  return true if the message is not a streaming message or the gap
+  from the last message is more than the message rate
+ */
+bool AP_Logger_RateLimiter::should_log(uint8_t msgid, bool writev_streaming)
+{
+    if (rate_limit_hz <= 0) {
+        // no limiting (user changed the parameter)
+        return true;
+    }
+    if (last_send_ms[msgid] == 0 && !writev_streaming) {
+        // might be non streaming. check the not_streaming bitmask
+        // cache
+        if (not_streaming.get(msgid)) {
+            return true;
+        }
+        const auto *mtype = front.structure_for_msg_type(msgid);
+        if (mtype == nullptr ||
+            mtype->streaming == false) {
+            not_streaming.set(msgid);
+            return true;
+        }
+    }
+
+#if !defined(HAL_BUILD_AP_PERIPH)
+    // if we've already decided on sending this msgid in this tick then use the
+    // same decision again
+    const uint16_t sched_ticks = AP::scheduler().ticks();
+    if (sched_ticks == last_sched_count[msgid]) {
+        return last_return.get(msgid);
+    }
+    last_sched_count[msgid] = sched_ticks;
+#endif
+
+    bool ret = should_log_streaming(msgid);
+    if (ret) {
+        last_return.set(msgid);
+    } else {
+        last_return.clear(msgid);
+    }
+    return ret;
 }

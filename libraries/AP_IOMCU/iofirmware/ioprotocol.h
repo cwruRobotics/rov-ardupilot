@@ -54,8 +54,8 @@ enum iopage {
     PAGE_SETUP = 50,
     PAGE_DIRECT_PWM = 54,
     PAGE_FAILSAFE_PWM = 55,
-    PAGE_SAFETY_PWM = 108,
     PAGE_MIXING = 200,
+    PAGE_GPIO = 201,
 };
 
 // setup page registers
@@ -83,6 +83,7 @@ enum iopage {
 #define PAGE_REG_SETUP_IGNORE_SAFETY 20 /* bitmask of surfaces to ignore the safety status */
 #define PAGE_REG_SETUP_HEATER_DUTY_CYCLE 21
 #define PAGE_REG_SETUP_DSM_BIND     22
+#define PAGE_REG_SETUP_RC_PROTOCOLS 23 // uses 2 slots, 23 and 24
 
 // config page registers
 #define PAGE_CONFIG_PROTOCOL_VERSION  0
@@ -123,6 +124,7 @@ struct page_rc_input {
     uint8_t flags_rc_ok:1;
     uint8_t rc_protocol;
     uint16_t pwm[IOMCU_MAX_CHANNELS];
+    int16_t rssi;
 };
 
 /*
@@ -158,4 +160,9 @@ struct page_mixing {
     uint8_t enabled;
 
     uint8_t pad; // pad to even size
+};
+
+struct __attribute__((packed, aligned(2))) page_GPIO {
+    uint8_t channel_mask;
+    uint8_t output_mask;
 };

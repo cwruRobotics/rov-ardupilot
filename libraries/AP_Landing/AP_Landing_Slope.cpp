@@ -89,12 +89,15 @@ bool AP_Landing::type_slope_verify_land(const Location &prev_WP_loc, Location &n
     const bool below_flare_sec = (flare_sec > 0 && height <= sink_rate * flare_sec);
     const bool probably_crashed = (aparm.crash_detection_enable && fabsf(sink_rate) < 0.2f && !is_flying);
 
+    height_flare_log = height;
+
+    const AP_GPS &gps = AP::gps();
+
     if ((on_approach_stage && below_flare_alt) ||
         (on_approach_stage && below_flare_sec && (wp_proportion > 0.5)) ||
         (!rangefinder_state_in_range && wp_proportion >= 1) ||
         probably_crashed) {
 
-        const AP_GPS &gps = AP::gps();
         if (type_slope_stage != SLOPE_STAGE_FINAL) {
             type_slope_flags.post_stats = true;
             if (is_flying && (AP_HAL::millis()-last_flying_ms) > 3000) {
@@ -154,6 +157,17 @@ bool AP_Landing::type_slope_verify_land(const Location &prev_WP_loc, Location &n
     // check if we should auto-disarm after a confirmed landing
     if (type_slope_stage == SLOPE_STAGE_FINAL) {
         disarm_if_autoland_complete_fn();
+    }
+
+    if (mission.continue_after_land() &&
+        type_slope_stage == SLOPE_STAGE_FINAL &&
+        gps.status() >= AP_GPS::GPS_OK_FIX_3D &&
+        gps.ground_speed() < 1) {
+        /*
+          user has requested to continue with mission after a
+          landing. Return true to allow for continue
+         */
+        return true;
     }
 
     /*
@@ -268,15 +282,8 @@ void AP_Landing::type_slope_setup_landing_glide_slope(const Location &prev_WP_lo
         aim_height = flare_alt*2;
     }
 
-    // calculate slope to landing point
-    bool is_first_calc = is_zero(slope);
-    slope = (sink_height - aim_height) / total_distance;
-    if (is_first_calc) {
-        gcs().send_text(MAV_SEVERITY_INFO, "Landing glide slope %.1f degrees", (double)degrees(atanf(slope)));
-    }
-
     // time before landing that we will flare
-    float flare_time = aim_height / SpdHgt_Controller->get_land_sinkrate();
+    float flare_time = aim_height / tecs_Controller->get_land_sinkrate();
 
     // distance to flare is based on ground speed, adjusted as we
     // get closer. This takes into account the wind
@@ -297,6 +304,13 @@ void AP_Landing::type_slope_setup_landing_glide_slope(const Location &prev_WP_lo
     Location loc = next_WP_loc;
     loc.offset_bearing(land_bearing_cd * 0.01f, -flare_distance);
     loc.alt += aim_height*100;
+
+    // calculate slope to landing point
+    bool is_first_calc = is_zero(slope);
+    slope = (sink_height - aim_height) / (total_distance - flare_distance);
+    if (is_first_calc) {
+        gcs().send_text(MAV_SEVERITY_INFO, "Landing glide slope %.1f degrees", (double)degrees(atanf(slope)));
+    }
 
     // calculate point along that slope 500m ahead
     loc.offset_bearing(land_bearing_cd * 0.01f, land_projection);
@@ -320,7 +334,7 @@ int32_t AP_Landing::type_slope_get_target_airspeed_cm(void)
     // we're landing, check for custom approach and
     // pre-flare airspeeds. Also increase for head-winds
 
-    const float land_airspeed = SpdHgt_Controller->get_land_airspeed();
+    const float land_airspeed = tecs_Controller->get_land_airspeed();
     int32_t target_airspeed_cm = aparm.airspeed_cruise_cm;
 
     switch (type_slope_stage) {
@@ -384,15 +398,25 @@ bool AP_Landing::type_slope_is_complete(void) const
 
 void AP_Landing::type_slope_log(void) const
 {
-    // log to AP_Logger
-    AP::logger().Write("LAND", "TimeUS,stage,f1,f2,slope,slopeInit,altO", "QBBBfff",
+// @LoggerMessage: LAND
+// @Description: Slope Landing data
+// @Field: TimeUS: Time since system startup
+// @Field: stage: progress through landing sequence
+// @Field: f1: Landing flags
+// @Field: f2: Slope-specific landing flags
+// @Field: slope: Slope to landing point
+// @Field: slopeInit: Initial slope to landing point
+// @Field: altO: Rangefinder correction
+// @Field: fh: Height for flare timing.
+    AP::logger().Write("LAND", "TimeUS,stage,f1,f2,slope,slopeInit,altO,fh", "QBBBffff",
                                             AP_HAL::micros64(),
                                             type_slope_stage,
                                             flags,
                                             type_slope_flags,
                                             (double)slope,
                                             (double)initial_slope,
-                                            (double)alt_offset);
+                                            (double)alt_offset,
+                                            (double)height_flare_log);
 }
 
 bool AP_Landing::type_slope_is_throttle_suppressed(void) const

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "RangeFinder.h"
-#include "RangeFinder_Backend_Serial.h"
+#include "AP_RangeFinder.h"
+#include "AP_RangeFinder_Backend_Serial.h"
 
 class AP_RangeFinder_Lanbao : public AP_RangeFinder_Backend_Serial
 {
@@ -17,13 +17,13 @@ public:
 
 protected:
 
-    virtual MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
+    MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
         return MAV_DISTANCE_SENSOR_LASER;
     }
 
 private:
     // get a reading
-    bool get_reading(uint16_t &reading_cm) override;
+    bool get_reading(float &reading_m) override;
 
     uint8_t buf[6];
     uint8_t buf_len = 0;

@@ -24,6 +24,11 @@
 #include "AP_GPS.h"
 #include "GPS_Backend.h"
 
+#ifndef AP_GPS_SBP_ENABLED
+  #define AP_GPS_SBP_ENABLED AP_GPS_BACKEND_DEFAULT_ENABLED
+#endif
+
+#if AP_GPS_SBP_ENABLED
 class AP_GPS_SBP : public AP_GPS_Backend
 {
 public:
@@ -31,7 +36,7 @@ public:
 
     AP_GPS::GPS_Status highest_supported_status(void) override { return AP_GPS::GPS_OK_FIX_3D_RTK_FIXED; }
 
-    bool supports_mavlink_gps_rtk_message() override { return true; }
+    bool supports_mavlink_gps_rtk_message() const override { return true; }
 
     // Methods
     bool read() override;
@@ -185,3 +190,4 @@ private:
 
 
 };
+#endif

@@ -25,15 +25,15 @@
 #include "UDPDevice.h"
 
 #include <GCS_MAVLink/GCS.h>
+#if HAL_GCS_ENABLED
 #include <AP_HAL/utility/packetise.h>
+#endif
 
 extern const AP_HAL::HAL& hal;
 
 using namespace Linux;
 
 UARTDriver::UARTDriver(bool default_console) :
-    device_path(nullptr),
-    _packetise(false),
     _device{new ConsoleDevice()}
 {
     if (default_console) {
@@ -79,7 +79,9 @@ void UARTDriver::begin(uint32_t b, uint16_t rxS, uint16_t txS)
 
     if (!_connected) {
         _connected = _device->open();
-        _device->set_blocking(false);
+        if (_connected) {
+            _device->set_blocking(false);
+        }
     }
     _initialised = false;
 
@@ -187,7 +189,9 @@ AP_HAL::OwnPtr<SerialDevice> UARTDriver::_parseDevicePath(const char *arg)
 
     if (strcmp(protocol, "udp") == 0 || strcmp(protocol, "udpin") == 0) {
         bool bcast = (_flag && strcmp(_flag, "bcast") == 0);
+#if HAL_GCS_ENABLED
         _packetise = true;
+#endif
         if (strcmp(protocol, "udp") == 0) {
             device = new UDPDevice(_ip, _base_port, bcast, false);
         } else {
@@ -291,6 +295,15 @@ int16_t UARTDriver::read()
     return byte;
 }
 
+bool UARTDriver::discard_input()
+{
+    if (!_initialised) {
+        return false;
+    }
+    _readbuf.clear();
+    return true;
+}
+
 /* Linux implementations of Print virtual methods */
 size_t UARTDriver::write(uint8_t c)
 {
@@ -380,10 +393,12 @@ bool UARTDriver::_write_pending_bytes(void)
     uint32_t available_bytes = _writebuf.available();
     uint16_t n = available_bytes;
 
+#if HAL_GCS_ENABLED
     if (_packetise && n > 0) {
         // send on MAVLink packet boundaries if possible
         n = mavlink_packetise(_writebuf, n);
     }
+#endif
 
     if (n > 0) {
         int ret;

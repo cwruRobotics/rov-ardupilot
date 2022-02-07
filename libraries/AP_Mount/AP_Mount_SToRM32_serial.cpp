@@ -1,8 +1,8 @@
 #include "AP_Mount_SToRM32_serial.h"
+#if HAL_MOUNT_ENABLED
 #include <AP_HAL/AP_HAL.h>
 #include <GCS_MAVLink/GCS_MAVLink.h>
 #include <GCS_MAVLink/include/mavlink/v2.0/checksum.h>
-#include <AP_GPS/AP_GPS.h>
 #include <AP_SerialManager/AP_SerialManager.h>
 
 extern const AP_HAL::HAL& hal;
@@ -80,6 +80,26 @@ void AP_Mount_SToRM32_serial::update()
             }
             break;
 
+        case MAV_MOUNT_MODE_HOME_LOCATION:
+            // constantly update the home location:
+            if (!AP::ahrs().home_is_set()) {
+                break;
+            }
+            _state._roi_target = AP::ahrs().get_home();
+            _state._roi_target_set = true;
+            if (calc_angle_to_roi_target(_angle_ef_target_rad, true, true)) {
+                resend_now = true;
+            }
+            break;
+
+        case MAV_MOUNT_MODE_SYSID_TARGET:
+            if (calc_angle_to_sysid_target(_angle_ef_target_rad,
+                                           true,
+                                           true)) {
+                resend_now = true;
+            }
+            break;
+
         default:
             // we do not know this mode so do nothing
             break;
@@ -130,7 +150,7 @@ void AP_Mount_SToRM32_serial::set_mode(enum MAV_MOUNT_MODE mode)
 void AP_Mount_SToRM32_serial::send_mount_status(mavlink_channel_t chan)
 {
     // return target angles as gimbal's actual attitude.
-    mavlink_msg_mount_status_send(chan, 0, 0, _current_angle.y, _current_angle.x, _current_angle.z);
+    mavlink_msg_mount_status_send(chan, 0, 0, _current_angle.y, _current_angle.x, _current_angle.z, _state._mode);
 }
 
 bool AP_Mount_SToRM32_serial::can_send(bool with_control) {
@@ -276,3 +296,4 @@ void AP_Mount_SToRM32_serial::parse_reply() {
             break;
     }
 }
+#endif // HAL_MOUNT_ENABLED

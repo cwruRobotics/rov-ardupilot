@@ -20,17 +20,6 @@
 
 extern const AP_HAL::HAL& hal;
 
-// constructor
-AP_Beacon_Pozyx::AP_Beacon_Pozyx(AP_Beacon &frontend, AP_SerialManager &serial_manager) :
-    AP_Beacon_Backend(frontend),
-    linebuf_len(0)
-{
-    uart = serial_manager.find_serial(AP_SerialManager::SerialProtocol_Beacon, 0);
-    if (uart != nullptr) {
-        uart->begin(serial_manager.find_baudrate(AP_SerialManager::SerialProtocol_Beacon, 0));
-    }
-}
-
 // return true if sensor is basically healthy (we are receiving data)
 bool AP_Beacon_Pozyx::healthy()
 {
@@ -41,12 +30,6 @@ bool AP_Beacon_Pozyx::healthy()
 // update the state of the sensor
 void AP_Beacon_Pozyx::update(void)
 {
-    static uint8_t counter = 0;
-    counter++;
-    if (counter > 200) {
-        counter = 0;
-    }
-
     if (uart == nullptr) {
         return;
     }

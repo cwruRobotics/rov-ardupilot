@@ -18,6 +18,14 @@
 
 #pragma once
 
+#include <AP_HAL/AP_HAL_Boards.h>
+
+#ifndef HAL_SIM_SCRIMMAGE_ENABLED
+#define HAL_SIM_SCRIMMAGE_ENABLED (CONFIG_HAL_BOARD == HAL_BOARD_SITL)
+#endif
+
+#if HAL_SIM_SCRIMMAGE_ENABLED
+
 #include <string>
 
 #include <AP_HAL/utility/Socket.h>
@@ -40,8 +48,6 @@ public:
     static Aircraft *create(const char *frame_str) {
         return new Scrimmage(frame_str);
     }
-
-    void set_config(const char *config) override;
 
     /*  Create and set in/out socket for extenal simulator */
     void set_interface_ports(const char* address, const int port_in, const int port_out) override;
@@ -76,19 +82,14 @@ private:
 
     void recv_fdm(const struct sitl_input &input);
     void send_servos(const struct sitl_input &input);
-    void start_scrimmage(void);
 
     uint64_t prev_timestamp_us;
     SocketAPM recv_sock;
     SocketAPM send_sock;
 
     const char *frame_str;
-
-    // Use ArduPlane by default
-    const char *mission_name = "arduplane.xml";
-    const char *motion_model = "JSBSimControl";
-    const char *visual_model = "zephyr-blue";
-    const char *terrain = "mcmillan";
 };
 
 } // namespace SITL
+
+#endif  // HAL_SIM_SCRIMMAGE_ENABLED

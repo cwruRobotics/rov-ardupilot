@@ -15,11 +15,11 @@ void Copter::init_rangefinder(void)
 #if RANGEFINDER_ENABLED == ENABLED
    rangefinder.set_log_rfnd_bit(MASK_LOG_CTUN);
    rangefinder.init(ROTATION_PITCH_270);
-   rangefinder_state.alt_cm_filt.set_cutoff_frequency(RANGEFINDER_WPNAV_FILT_HZ);
+   rangefinder_state.alt_cm_filt.set_cutoff_frequency(g2.rangefinder_filt);
    rangefinder_state.enabled = rangefinder.has_orientation(ROTATION_PITCH_270);
 
    // upward facing range finder
-   rangefinder_up_state.alt_cm_filt.set_cutoff_frequency(RANGEFINDER_WPNAV_FILT_HZ);
+   rangefinder_up_state.alt_cm_filt.set_cutoff_frequency(g2.rangefinder_filt);
    rangefinder_up_state.enabled = rangefinder.has_orientation(ROTATION_PITCH_90);
 #endif
 }
@@ -40,7 +40,7 @@ void Copter::read_rangefinder(void)
     struct {
         RangeFinderState &state;
         enum Rotation orientation;
-    } rngfnd[2] = { {rangefinder_state, ROTATION_PITCH_270}, {rangefinder_up_state, ROTATION_PITCH_90}};
+    } rngfnd[2] = {{rangefinder_state, ROTATION_PITCH_270}, {rangefinder_up_state, ROTATION_PITCH_90}};
 
     for (uint8_t i=0; i < ARRAY_SIZE(rngfnd); i++) {
         // local variables to make accessing simpler
@@ -53,6 +53,9 @@ void Copter::read_rangefinder(void)
 
         // tilt corrected but unfiltered, not glitch protected alt
         rf_state.alt_cm = tilt_correction * rangefinder.distance_cm_orient(rf_orient);
+
+        // remember inertial alt to allow us to interpolate rangefinder
+        rf_state.inertial_alt_cm = inertial_nav.get_position_z_up_cm();
 
         // glitch handling.  rangefinder readings more than RANGEFINDER_GLITCH_ALT_CM from the last good reading
         // are considered a glitch and glitch_count becomes non-zero
@@ -87,10 +90,16 @@ void Copter::read_rangefinder(void)
             rf_state.last_healthy_ms = now;
         }
 
-        // send downward facing lidar altitude and health to waypoint navigation library
+        // send downward facing lidar altitude and health to the libraries that require it
         if (rf_orient == ROTATION_PITCH_270) {
             if (rangefinder_state.alt_healthy || timed_out) {
                 wp_nav->set_rangefinder_alt(rangefinder_state.enabled, rangefinder_state.alt_healthy, rangefinder_state.alt_cm_filt.get());
+#if MODE_CIRCLE_ENABLED
+                circle_nav->set_rangefinder_alt(rangefinder_state.enabled && wp_nav->rangefinder_used(), rangefinder_state.alt_healthy, rangefinder_state.alt_cm_filt.get());
+#endif
+#if HAL_PROXIMITY_ENABLED
+                g2.proximity.set_rangefinder_alt(rangefinder_state.enabled, rangefinder_state.alt_healthy, rangefinder_state.alt_cm_filt.get());
+#endif
             }
         }
     }
@@ -109,121 +118,30 @@ void Copter::read_rangefinder(void)
 }
 
 // return true if rangefinder_alt can be used
-bool Copter::rangefinder_alt_ok()
+bool Copter::rangefinder_alt_ok() const
 {
     return (rangefinder_state.enabled && rangefinder_state.alt_healthy);
 }
 
 // return true if rangefinder_alt can be used
-bool Copter::rangefinder_up_ok()
+bool Copter::rangefinder_up_ok() const
 {
     return (rangefinder_up_state.enabled && rangefinder_up_state.alt_healthy);
 }
 
 /*
-  update RPM sensors
+  get inertially interpolated rangefinder height. Inertial height is
+  recorded whenever we update the rangefinder height, then we use the
+  difference between the inertial height at that time and the current
+  inertial height to give us interpolation of height from rangefinder
  */
-void Copter::rpm_update(void)
+bool Copter::get_rangefinder_height_interpolated_cm(int32_t& ret)
 {
-#if RPM_ENABLED == ENABLED
-    rpm_sensor.update();
-    if (rpm_sensor.enabled(0) || rpm_sensor.enabled(1)) {
-        if (should_log(MASK_LOG_RCIN)) {
-            logger.Write_RPM(rpm_sensor);
-        }
+    if (!rangefinder_alt_ok()) {
+        return false;
     }
-#endif
-}
-
-// initialise optical flow sensor
-void Copter::init_optflow()
-{
-#if OPTFLOW == ENABLED
-    // initialise optical flow sensor
-    optflow.init(MASK_LOG_OPTFLOW);
-#endif      // OPTFLOW == ENABLED
-}
-
-void Copter::compass_cal_update()
-{
-    compass.cal_update();
-
-    if (hal.util->get_soft_armed()) {
-        return;
-    }
-
-    static uint32_t compass_cal_stick_gesture_begin = 0;
-
-    if (compass.is_calibrating()) {
-        if (channel_yaw->get_control_in() < -4000 && channel_throttle->get_control_in() > 900) {
-            compass.cancel_calibration_all();
-        }
-    } else {
-        bool stick_gesture_detected = compass_cal_stick_gesture_begin != 0 && !motors->armed() && channel_yaw->get_control_in() > 4000 && channel_throttle->get_control_in() > 900;
-        uint32_t tnow = millis();
-
-        if (!stick_gesture_detected) {
-            compass_cal_stick_gesture_begin = tnow;
-        } else if (tnow-compass_cal_stick_gesture_begin > 1000*COMPASS_CAL_STICK_GESTURE_TIME) {
-#ifdef CAL_ALWAYS_REBOOT
-            compass.start_calibration_all(true,true,COMPASS_CAL_STICK_DELAY,true);
-#else
-            compass.start_calibration_all(true,true,COMPASS_CAL_STICK_DELAY,false);
-#endif
-        }
-    }
-}
-
-void Copter::accel_cal_update()
-{
-    if (hal.util->get_soft_armed()) {
-        return;
-    }
-    ins.acal_update();
-    // check if new trim values, and set them
-    float trim_roll, trim_pitch;
-    if(ins.get_new_trim(trim_roll, trim_pitch)) {
-        ahrs.set_trim(Vector3f(trim_roll, trim_pitch, 0));
-    }
-
-#ifdef CAL_ALWAYS_REBOOT
-    if (ins.accel_cal_requires_reboot()) {
-        hal.scheduler->delay(1000);
-        hal.scheduler->reboot(false);
-    }
-#endif
-}
-
-// initialise proximity sensor
-void Copter::init_proximity(void)
-{
-#if PROXIMITY_ENABLED == ENABLED
-    g2.proximity.init();
-#endif
-}
-
-// init visual odometry sensor
-void Copter::init_visual_odom()
-{
-#if VISUAL_ODOMETRY_ENABLED == ENABLED
-    g2.visual_odom.init();
-#endif
-}
-
-// winch and wheel encoder initialisation
-void Copter::winch_init()
-{
-#if WINCH_ENABLED == ENABLED
-    g2.wheel_encoder.init();
-    g2.winch.init(&g2.wheel_encoder);
-#endif
-}
-
-// winch and wheel encoder update
-void Copter::winch_update()
-{
-#if WINCH_ENABLED == ENABLED
-    g2.wheel_encoder.update();
-    g2.winch.update();
-#endif
+    ret = rangefinder_state.alt_cm_filt.get();
+    float inertial_alt_cm = inertial_nav.get_position_z_up_cm();
+    ret += inertial_alt_cm - rangefinder_state.inertial_alt_cm;
+    return true;
 }

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "RangeFinder.h"
-#include "RangeFinder_Backend_Serial.h"
+#include "AP_RangeFinder.h"
+#include "AP_RangeFinder_Backend_Serial.h"
 
 // WASP 200 LRF
 // http://www.attolloengineering.com/wasp-200-lrf.html
@@ -10,8 +10,7 @@ class AP_RangeFinder_Wasp : public AP_RangeFinder_Backend_Serial {
 
 public:
     AP_RangeFinder_Wasp(RangeFinder::RangeFinder_State &_state,
-                        AP_RangeFinder_Params &_params,
-                        uint8_t serial_instance);
+                        AP_RangeFinder_Params &_params);
 
     void update(void) override;
 
@@ -24,7 +23,7 @@ protected:
         return 115200;
     }
 
-    virtual MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
+    MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
         return MAV_DISTANCE_SENSOR_LASER;
     }
 
@@ -47,7 +46,7 @@ private:
 
     wasp_configuration_stage configuration_state = WASP_CFG_PROTOCOL;
 
-    bool get_reading(uint16_t &reading_cm) override;
+    bool get_reading(float &reading_m) override;
 
     void parse_response(void);
 

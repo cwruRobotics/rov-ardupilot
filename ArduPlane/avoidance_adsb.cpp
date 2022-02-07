@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "Plane.h"
 
+#if HAL_ADSB_ENABLED
 void Plane::avoidance_adsb_update(void)
 {
     adsb.update();
@@ -23,11 +24,19 @@ MAV_COLLISION_ACTION AP_Avoidance_Plane::handle_avoidance(const AP_Avoidance::Ob
     }
 
     // take no action in some flight modes
+    bool flightmode_prohibits_action = false;
     if (plane.control_mode == &plane.mode_manual ||
         (plane.control_mode == &plane.mode_auto && !plane.auto_state.takeoff_complete) ||
         (plane.flight_stage == AP_Vehicle::FixedWing::FLIGHT_LAND) || // TODO: consider allowing action during approach
-        plane.control_mode == &plane.mode_autotune ||
-        plane.control_mode == &plane.mode_qland) {
+        plane.control_mode == &plane.mode_autotune) {
+        flightmode_prohibits_action = true;
+    }
+#if HAL_QUADPLANE_ENABLED
+    if (plane.control_mode == &plane.mode_qland) {
+        flightmode_prohibits_action = true;
+    }
+#endif
+    if (flightmode_prohibits_action) {
         actual_action = MAV_COLLISION_ACTION_NONE;
     }
 
@@ -42,11 +51,13 @@ MAV_COLLISION_ACTION AP_Avoidance_Plane::handle_avoidance(const AP_Avoidance::Ob
 
         case MAV_COLLISION_ACTION_HOVER:
             if (failsafe_state_change) {
+#if HAL_QUADPLANE_ENABLED
                 if (plane.quadplane.is_flying()) {
                     plane.set_mode(plane.mode_qloiter, ModeReason::AVOIDANCE);
-                } else {
-                    plane.set_mode(plane.mode_loiter, ModeReason::AVOIDANCE);
+                    break;
                 }
+#endif
+                plane.set_mode(plane.mode_loiter, ModeReason::AVOIDANCE);
             }
             break;
 
@@ -97,34 +108,34 @@ MAV_COLLISION_ACTION AP_Avoidance_Plane::handle_avoidance(const AP_Avoidance::Ob
     return actual_action;
 }
 
-void AP_Avoidance_Plane::handle_recovery(uint8_t recovery_action)
+void AP_Avoidance_Plane::handle_recovery(RecoveryAction recovery_action)
 {
     // check we are coming out of failsafe
     if (plane.failsafe.adsb) {
         plane.failsafe.adsb = false;
-        gcs().send_text(MAV_SEVERITY_INFO, "Avoid: Resuming with action: %d", recovery_action);
+        gcs().send_text(MAV_SEVERITY_INFO, "Avoid: Resuming with action: %u", (unsigned)recovery_action);
 
         // restore flight mode if requested and user has not changed mode since
         if (plane.control_mode_reason == ModeReason::AVOIDANCE) {
             switch (recovery_action) {
 
-            case AP_AVOIDANCE_RECOVERY_REMAIN_IN_AVOID_ADSB:
+            case RecoveryAction::REMAIN_IN_AVOID_ADSB:
                 // do nothing, we'll stay in the AVOID_ADSB mode which is guided which will loiter
                 break;
 
-            case AP_AVOIDANCE_RECOVERY_RESUME_PREVIOUS_FLIGHTMODE:
+            case RecoveryAction::RESUME_PREVIOUS_FLIGHTMODE:
                 plane.set_mode_by_number(prev_control_mode_number, ModeReason::AVOIDANCE_RECOVERY);
                 break;
 
-            case AP_AVOIDANCE_RECOVERY_RTL:
+            case RecoveryAction::RTL:
                 plane.set_mode(plane.mode_rtl, ModeReason::AVOIDANCE_RECOVERY);
                 break;
 
-            case AP_AVOIDANCE_RECOVERY_RESUME_IF_AUTO_ELSE_LOITER:
+            case RecoveryAction::RESUME_IF_AUTO_ELSE_LOITER:
                 if (prev_control_mode_number == Mode::Number::AUTO) {
                     plane.set_mode(plane.mode_auto, ModeReason::AVOIDANCE_RECOVERY);
                 }
-                // else do nothing, same as AP_AVOIDANCE_RECOVERY_LOITER
+                // else do nothing, same as RecoveryAction::LOITER
                 break;
 
             default:
@@ -201,4 +212,6 @@ bool AP_Avoidance_Plane::handle_avoidance_horizontal(const AP_Avoidance::Obstacl
     // if we got this far we failed to set the new target
     return false;
 }
+
+#endif // HAL_ADSB_ENABLED
 

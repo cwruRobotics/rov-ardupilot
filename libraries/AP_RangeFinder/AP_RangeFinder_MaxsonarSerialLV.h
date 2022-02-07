@@ -1,14 +1,14 @@
 #pragma once
 
-#include "RangeFinder.h"
-#include "RangeFinder_Backend_Serial.h"
+#include "AP_RangeFinder.h"
+#include "AP_RangeFinder_Backend_Serial.h"
 
 class AP_RangeFinder_MaxsonarSerialLV : public AP_RangeFinder_Backend_Serial
 {
 
 public:
 
-    using AP_RangeFinder_Backend_Serial::AP_RangeFinder_Backend_Serial;
+    AP_RangeFinder_MaxsonarSerialLV(RangeFinder::RangeFinder_State &_state, AP_RangeFinder_Params &_params);
 
 protected:
 
@@ -18,7 +18,7 @@ protected:
 
 private:
     // get a reading
-    bool get_reading(uint16_t &reading_cm) override;
+    bool get_reading(float &reading_m) override;
 
     uint16_t read_timeout_ms() const override { return 500; }
 

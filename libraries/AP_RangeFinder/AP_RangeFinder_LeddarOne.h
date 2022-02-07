@@ -1,7 +1,7 @@
 #pragma once
 
-#include "RangeFinder.h"
-#include "RangeFinder_Backend_Serial.h"
+#include "AP_RangeFinder.h"
+#include "AP_RangeFinder_Backend_Serial.h"
 
 // defines
 #define LEDDARONE_DEFAULT_ADDRESS 0x01
@@ -46,13 +46,13 @@ public:
 
 protected:
 
-    virtual MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
+    MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
         return MAV_DISTANCE_SENSOR_LASER;
     }
 
 private:
     // get a reading
-    bool get_reading(uint16_t &reading_cm) override;
+    bool get_reading(float &reading_m) override;
 
     // CRC16
     bool CRC16(uint8_t *aBuffer, uint8_t aLength, bool aCheck);

@@ -24,28 +24,23 @@
 extern const AP_HAL::HAL &hal;
 
 // parameter defaults
-const float OA_LOOKAHEAD_DEFAULT = 15;
 const float OA_MARGIN_MAX_DEFAULT = 5;
+const int16_t OA_OPTIONS_DEFAULT = 1;
 
-const int16_t OA_TIMEOUT_MS = 2000;             // avoidance results over 2 seconds old are ignored
+const int16_t OA_UPDATE_MS = 1000;      // path planning updates run at 1hz
+const int16_t OA_TIMEOUT_MS = 3000;     // results over 3 seconds old are ignored
 
 const AP_Param::GroupInfo AP_OAPathPlanner::var_info[] = {
 
     // @Param: TYPE
     // @DisplayName: Object Avoidance Path Planning algorithm to use
     // @Description: Enabled/disable path planning around obstacles
-    // @Values: 0:Disabled,1:BendyRuler,2:Dijkstra
+    // @Values: 0:Disabled,1:BendyRuler,2:Dijkstra,3:Dijkstra with BendyRuler
     // @User: Standard
     AP_GROUPINFO_FLAGS("TYPE", 1,  AP_OAPathPlanner, _type, OA_PATHPLAN_DISABLED, AP_PARAM_FLAG_ENABLE),
 
-    // @Param: LOOKAHEAD
-    // @DisplayName: Object Avoidance look ahead distance maximum
-    // @Description: Object Avoidance will look this many meters ahead of vehicle
-    // @Units: m
-    // @Range: 1 100
-    // @Increment: 1
-    // @User: Standard
-    AP_GROUPINFO("LOOKAHEAD", 2, AP_OAPathPlanner, _lookahead, OA_LOOKAHEAD_DEFAULT),
+    // Note: Do not use Index "2" for any new parameter
+    //       It was being used by _LOOKAHEAD which was later moved to AP_OABendyRuler 
 
     // @Param: MARGIN_MAX
     // @DisplayName: Object Avoidance wide margin distance
@@ -56,11 +51,21 @@ const AP_Param::GroupInfo AP_OAPathPlanner::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("MARGIN_MAX", 3, AP_OAPathPlanner, _margin_max, OA_MARGIN_MAX_DEFAULT),
 
-#if !HAL_MINIMIZE_FEATURES
     // @Group: DB_
     // @Path: AP_OADatabase.cpp
     AP_SUBGROUPINFO(_oadatabase, "DB_", 4, AP_OAPathPlanner, AP_OADatabase),
-#endif
+
+    // @Param: OPTIONS
+    // @DisplayName: Options while recovering from Object Avoidance
+    // @Description: Bitmask which will govern vehicles behaviour while recovering from Obstacle Avoidance (i.e Avoidance is turned off after the path ahead is clear).   
+    // @Bitmask{Rover}: 0: Reset the origin of the waypoint to the present location, 1: log Dijkstra points
+    // @Bitmask{Copter}: 1: log Dijkstra points
+    // @User: Standard
+    AP_GROUPINFO("OPTIONS", 5, AP_OAPathPlanner, _options, OA_OPTIONS_DEFAULT),
+
+    // @Group: BR_
+    // @Path: AP_OABendyRuler.cpp
+    AP_SUBGROUPPTR(_oabendyruler, "BR_", 6, AP_OAPathPlanner, AP_OABendyRuler),
 
     AP_GROUPEND
 };
@@ -84,11 +89,21 @@ void AP_OAPathPlanner::init()
     case OA_PATHPLAN_BENDYRULER:
         if (_oabendyruler == nullptr) {
             _oabendyruler = new AP_OABendyRuler();
+            AP_Param::load_object_from_eeprom(_oabendyruler, AP_OABendyRuler::var_info);
         }
         break;
     case OA_PATHPLAN_DIJKSTRA:
         if (_oadijkstra == nullptr) {
-            _oadijkstra = new AP_OADijkstra();
+            _oadijkstra = new AP_OADijkstra(_options);
+        }
+        break;
+    case OA_PATHPLAN_DJIKSTRA_BENDYRULER:
+        if (_oadijkstra == nullptr) {
+            _oadijkstra = new AP_OADijkstra(_options);
+        }
+        if (_oabendyruler == nullptr) {
+            _oabendyruler = new AP_OABendyRuler();
+            AP_Param::load_object_from_eeprom(_oabendyruler, AP_OABendyRuler::var_info);
         }
         break;
     }
@@ -114,6 +129,12 @@ bool AP_OAPathPlanner::pre_arm_check(char *failure_msg, uint8_t failure_msg_len)
     case OA_PATHPLAN_DIJKSTRA:
         if (_oadijkstra == nullptr) {
             hal.util->snprintf(failure_msg, failure_msg_len, "Dijkstra OA requires reboot");
+            return false;
+        }
+        break;
+    case OA_PATHPLAN_DJIKSTRA_BENDYRULER:
+        if(_oadijkstra == nullptr || _oabendyruler == nullptr) {
+            hal.util->snprintf(failure_msg, failure_msg_len, "OA requires reboot");
             return false;
         }
         break;
@@ -144,13 +165,30 @@ bool AP_OAPathPlanner::start_thread()
     return true;
 }
 
+// helper function to map OABendyType to OAPathPlannerUsed
+AP_OAPathPlanner::OAPathPlannerUsed AP_OAPathPlanner::map_bendytype_to_pathplannerused(AP_OABendyRuler::OABendyType bendy_type)
+{
+    switch (bendy_type) {
+    case AP_OABendyRuler::OABendyType::OA_BENDY_HORIZONTAL:
+        return OAPathPlannerUsed::BendyRulerHorizontal;
+
+    case AP_OABendyRuler::OABendyType::OA_BENDY_VERTICAL:
+        return OAPathPlannerUsed::BendyRulerVertical;
+
+    default:
+    case AP_OABendyRuler::OABendyType::OA_BENDY_DISABLED:
+        return OAPathPlannerUsed::None;
+    }
+}
+
 // provides an alternative target location if path planning around obstacles is required
 // returns true and updates result_loc with an intermediate location
 AP_OAPathPlanner::OA_RetState AP_OAPathPlanner::mission_avoidance(const Location &current_loc,
                                          const Location &origin,
                                          const Location &destination,
                                          Location &result_origin,
-                                         Location &result_destination)
+                                         Location &result_destination,
+                                         OAPathPlannerUsed &path_planner_used)
 {
     // exit immediately if disabled or thread is not running from a failed init
     if (_type == OA_PATHPLAN_DISABLED || !_thread_created) {
@@ -178,6 +216,7 @@ AP_OAPathPlanner::OA_RetState AP_OAPathPlanner::mission_avoidance(const Location
         // we have a result from the thread
         result_origin = avoidance_result.origin_new;
         result_destination = avoidance_result.destination_new;
+        path_planner_used = avoidance_result.path_planner_used;
         return avoidance_result.ret_state;
     }
 
@@ -193,8 +232,18 @@ AP_OAPathPlanner::OA_RetState AP_OAPathPlanner::mission_avoidance(const Location
 // avoidance thread that continually updates the avoidance_result structure based on avoidance_request
 void AP_OAPathPlanner::avoidance_thread()
 {
+    // require ekf origin to have been set
+    bool origin_set = false;
+    while (!origin_set) {
+        hal.scheduler->delay(500);
+        struct Location ekf_origin {};
+        {
+            WITH_SEMAPHORE(AP::ahrs().get_semaphore());
+            origin_set = AP::ahrs().get_origin(ekf_origin);    
+        }
+    }
+
     while (true) {
-#if !HAL_MINIMIZE_FEATURES
 
         // if database queue needs attention, service it faster
         if (_oadatabase.process_queue()) {
@@ -204,16 +253,12 @@ void AP_OAPathPlanner::avoidance_thread()
         }
 
         const uint32_t now = AP_HAL::millis();
-        if (now - avoidance_latest_ms < 100) {
+        if (now - avoidance_latest_ms < OA_UPDATE_MS) {
             continue;
         }
         avoidance_latest_ms = now;
 
         _oadatabase.update();
-#else
-        hal.scheduler->delay(100);
-        const uint32_t now = AP_HAL::millis();
-#endif
 
         Location origin_new;
         Location destination_new;
@@ -234,20 +279,25 @@ void AP_OAPathPlanner::avoidance_thread()
 
         // run background task looking for best alternative destination
         OA_RetState res = OA_NOT_REQUIRED;
+        OAPathPlannerUsed path_planner_used = OAPathPlannerUsed::None;
         switch (_type) {
         case OA_PATHPLAN_DISABLED:
             continue;
-        case OA_PATHPLAN_BENDYRULER:
+        case OA_PATHPLAN_BENDYRULER: {
             if (_oabendyruler == nullptr) {
                 continue;
             }
-            _oabendyruler->set_config(_lookahead, _margin_max);
-            if (_oabendyruler->update(avoidance_request2.current_loc, avoidance_request2.destination, avoidance_request2.ground_speed_vec, origin_new, destination_new)) {
+            _oabendyruler->set_config(_margin_max);
+
+            AP_OABendyRuler::OABendyType bendy_type;
+            if (_oabendyruler->update(avoidance_request2.current_loc, avoidance_request2.destination, avoidance_request2.ground_speed_vec, origin_new, destination_new, bendy_type, false)) {
                 res = OA_SUCCESS;
             }
+            path_planner_used = map_bendytype_to_pathplannerused(bendy_type);
             break;
+        }
 
-        case OA_PATHPLAN_DIJKSTRA:
+        case OA_PATHPLAN_DIJKSTRA: {
             if (_oadijkstra == nullptr) {
                 continue;
             }
@@ -264,8 +314,48 @@ void AP_OAPathPlanner::avoidance_thread()
                 res = OA_SUCCESS;
                 break;
             }
+            path_planner_used = OAPathPlannerUsed::Dijkstras;
             break;
         }
+
+        case OA_PATHPLAN_DJIKSTRA_BENDYRULER: {
+            if ((_oabendyruler == nullptr) || _oadijkstra == nullptr) {
+                continue;
+            } 
+            _oabendyruler->set_config(_margin_max);
+            AP_OABendyRuler::OABendyType bendy_type;
+            if (_oabendyruler->update(avoidance_request2.current_loc, avoidance_request2.destination, avoidance_request2.ground_speed_vec, origin_new, destination_new, bendy_type, proximity_only)) {
+                // detected a obstacle by vehicle's proximity sensor. Switch avoidance to BendyRuler till obstacle is out of the way
+                proximity_only = false;
+                res = OA_SUCCESS;
+                path_planner_used = map_bendytype_to_pathplannerused(bendy_type);
+                break;
+            } else {
+                // cleared all obstacles, trigger Dijkstra's to calculate path based on current deviated position  
+                if (proximity_only == false) {
+                    _oadijkstra->recalculate_path();
+                }
+                // only use proximity avoidance now for BendyRuler
+                proximity_only = true;
+            }
+            _oadijkstra->set_fence_margin(_margin_max);
+            const AP_OADijkstra::AP_OADijkstra_State dijkstra_state = _oadijkstra->update(avoidance_request2.current_loc, avoidance_request2.destination, origin_new, destination_new);
+            switch (dijkstra_state) {
+            case AP_OADijkstra::DIJKSTRA_STATE_NOT_REQUIRED:
+                res = OA_NOT_REQUIRED;
+                break;
+            case AP_OADijkstra::DIJKSTRA_STATE_ERROR:
+                res = OA_ERROR;
+                break;
+            case AP_OADijkstra::DIJKSTRA_STATE_SUCCESS:
+                res = OA_SUCCESS;
+                break;
+            }
+            path_planner_used = OAPathPlannerUsed::Dijkstras;
+            break;
+        }
+
+        } // switch
 
         {
             // give the main thread the avoidance result
@@ -274,6 +364,7 @@ void AP_OAPathPlanner::avoidance_thread()
             avoidance_result.origin_new = (res == OA_SUCCESS) ? origin_new : avoidance_result.origin_new;
             avoidance_result.destination_new = (res == OA_SUCCESS) ? destination_new : avoidance_result.destination;
             avoidance_result.result_time_ms = AP_HAL::millis();
+            avoidance_result.path_planner_used = path_planner_used;
             avoidance_result.ret_state = res;
         }
     }

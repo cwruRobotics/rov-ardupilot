@@ -12,15 +12,14 @@ build = {
 
 # MCU parameters
 mcu = {
-    # location of MCU serial number
-    'UDID_START' : 0x1FFF7A10,
-
     # ram map, as list of (address, size-kb, flags)
     # flags of 1 means DMA-capable
     # flags of 2 means faster memory for CPU intensive work
     'RAM_MAP' : [
         (0x20000000, 256, 1), # main memory, DMA safe
-    ]
+    ],
+
+    'EXPECTED_CLOCK' : 100000000,
 }
 
 DMA_Map = {
@@ -44,7 +43,7 @@ DMA_Map = {
 	"QUADSPI" 	:	[(2,7,3)],
 	"SDIO"    	:	[(2,3,4),(2,6,4)],
 	"SPI1_RX" 	:	[(2,0,3),(2,2,3)],
-	"SPI1_TX" 	:	[(2,2,2),(2,3,3),(2,5,3)],
+	"SPI1_TX" 	:	[(2,3,3),(2,5,3)],
 	"SPI2_RX" 	:	[(1,3,0)],
 	"SPI2_TX" 	:	[(1,4,0)],
 	"SPI3_RX" 	:	[(1,0,0),(1,2,0)],

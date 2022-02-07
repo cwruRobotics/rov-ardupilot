@@ -21,7 +21,7 @@
 extern const AP_HAL::HAL& hal;
 
 // read - return last value measured by sensor
-bool AP_RangeFinder_LeddarOne::get_reading(uint16_t &reading_cm)
+bool AP_RangeFinder_LeddarOne::get_reading(float &reading_m)
 {
     uint8_t number_detections;
     LeddarOne_Status leddarone_status;
@@ -32,16 +32,8 @@ bool AP_RangeFinder_LeddarOne::get_reading(uint16_t &reading_cm)
 
     switch (modbus_status) {
     case LEDDARONE_MODBUS_STATE_INIT: {
-        uint8_t index = 0;
-        // clear read buffer
-        uint32_t nbytes = uart->available();
-        while (nbytes-- > 0) {
-            uart->read();
-            if (++index > LEDDARONE_SERIAL_PORT_MAX) {
-                // LEDDARONE_STATE_ERR_SERIAL_PORT
-                return false;
-            }
-        }
+        uart->discard_input();
+
         // clear buffer and buffer_len
         memset(read_buffer, 0, sizeof(read_buffer));
         read_len = 0;
@@ -78,7 +70,7 @@ bool AP_RangeFinder_LeddarOne::get_reading(uint16_t &reading_cm)
         leddarone_status = parse_response(number_detections);
 
         if (leddarone_status == LEDDARONE_STATE_OK) {
-            reading_cm = sum_distance / number_detections;
+            reading_m = (sum_distance * 0.01f) / number_detections;
 
             // reset mod_bus status to read new buffer
             modbus_status = LEDDARONE_MODBUS_STATE_INIT;
@@ -160,7 +152,7 @@ LeddarOne_Status AP_RangeFinder_LeddarOne::parse_response(uint8_t &number_detect
         }
     }
 
-    // lead_len is not 25 byte or function code is not 0x04
+    // read_len is not 25 byte or function code is not 0x04
     if (read_len != LEDDARONE_READ_BUFFER_SIZE || read_buffer[1] != LEDDARONE_MODOBUS_FUNCTION_CODE) {
         return LEDDARONE_STATE_ERR_BAD_RESPONSE;
     }

@@ -37,8 +37,8 @@ bool AP_Declination::get_mag_field_ef(float latitude_deg, float longitude_deg, f
     bool valid_input_data = true;
 
     /* round down to nearest sampling resolution */
-    int32_t min_lat = static_cast<int32_t>(static_cast<int32_t>(latitude_deg / SAMPLING_RES) * SAMPLING_RES);
-    int32_t min_lon = static_cast<int32_t>(static_cast<int32_t>(longitude_deg / SAMPLING_RES) * SAMPLING_RES);
+    int32_t min_lat = static_cast<int32_t>(static_cast<int32_t>(floorf(latitude_deg / SAMPLING_RES)) * SAMPLING_RES);
+    int32_t min_lon = static_cast<int32_t>(static_cast<int32_t>(floorf(longitude_deg / SAMPLING_RES)) * SAMPLING_RES);
 
     /* for the rare case of hitting the bounds exactly
      * the rounding logic wouldn't fit, so enforce it.
@@ -72,7 +72,7 @@ bool AP_Declination::get_mag_field_ef(float latitude_deg, float longitude_deg, f
     /* calculate intensity */
 
     float data_sw = intensity_table[min_lat_index][min_lon_index];
-    float data_se = intensity_table[min_lat_index][min_lon_index + 1];;
+    float data_se = intensity_table[min_lat_index][min_lon_index + 1];
     float data_ne = intensity_table[min_lat_index + 1][min_lon_index + 1];
     float data_nw = intensity_table[min_lat_index + 1][min_lon_index];
 
@@ -86,7 +86,7 @@ bool AP_Declination::get_mag_field_ef(float latitude_deg, float longitude_deg, f
     /* calculate declination */
 
     data_sw = declination_table[min_lat_index][min_lon_index];
-    data_se = declination_table[min_lat_index][min_lon_index + 1];;
+    data_se = declination_table[min_lat_index][min_lon_index + 1];
     data_ne = declination_table[min_lat_index + 1][min_lon_index + 1];
     data_nw = declination_table[min_lat_index + 1][min_lon_index];
 
@@ -100,7 +100,7 @@ bool AP_Declination::get_mag_field_ef(float latitude_deg, float longitude_deg, f
     /* calculate inclination */
 
     data_sw = inclination_table[min_lat_index][min_lon_index];
-    data_se = inclination_table[min_lat_index][min_lon_index + 1];;
+    data_se = inclination_table[min_lat_index][min_lon_index + 1];
     data_ne = inclination_table[min_lat_index + 1][min_lon_index + 1];
     data_nw = inclination_table[min_lat_index + 1][min_lon_index];
 

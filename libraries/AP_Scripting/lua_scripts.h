@@ -20,21 +20,62 @@
 
 #include <AP_Filesystem/posix_compat.h>
 #include "lua_bindings.h"
+#include <AP_Scripting/AP_Scripting.h>
+#include <GCS_MAVLink/GCS.h>
+
+#ifndef REPL_DIRECTORY
+  #if HAL_OS_FATFS_IO
+    #define REPL_DIRECTORY "/APM/repl"
+  #else
+    #define REPL_DIRECTORY "./repl"
+  #endif //HAL_OS_FATFS_IO
+#endif // REPL_DIRECTORY
+
+#ifndef SCRIPTING_DIRECTORY
+  #if HAL_OS_FATFS_IO
+    #define SCRIPTING_DIRECTORY "/APM/scripts"
+  #else
+    #define SCRIPTING_DIRECTORY "./scripts"
+  #endif //HAL_OS_FATFS_IO
+#endif // SCRIPTING_DIRECTORY
+
+#ifndef REPL_IN
+  #define REPL_IN REPL_DIRECTORY "/in"
+#endif // REPL_IN
+
+#ifndef REPL_OUT
+  #define REPL_OUT REPL_DIRECTORY "/out"
+#endif // REPL_OUT
 
 class lua_scripts
 {
 public:
-    lua_scripts(const AP_Int32 &vm_steps, const AP_Int32 &heap_size, const AP_Int8 &debug_level);
+    lua_scripts(const AP_Int32 &vm_steps, const AP_Int32 &heap_size, const AP_Int8 &debug_options, struct AP_Scripting::terminal_s &_terminal);
 
     /* Do not allow copies */
     lua_scripts(const lua_scripts &other) = delete;
     lua_scripts &operator=(const lua_scripts&) = delete;
 
+    // return true if initialisation failed
+    bool heap_allocated() const { return _heap != nullptr; }
+
     // run scripts, does not return unless an error occured
     void run(void);
 
     static bool overtime; // script exceeded it's execution slot, and we are bailing out
+
+    enum class DebugLevel {
+        NO_SCRIPTS_TO_RUN = 1U << 0,
+        RUNTIME_MSG = 1U << 1,
+        SUPPRESS_SCRIPT_LOG = 1U << 2,
+        LOG_RUNTIME = 1U << 3,
+    };
+
 private:
+
+    void create_sandbox(lua_State *L);
+
+    void repl_cleanup(void);
 
     typedef struct script_info {
        int lua_ref;          // reference to the loaded script object
@@ -45,6 +86,8 @@ private:
 
     script_info *load_script(lua_State *L, char *filename);
 
+    void reset_loop_overtime(lua_State *L);
+
     void load_all_scripts_in_dir(lua_State *L, const char *dirname);
 
     void run_next_script(lua_State *L);
@@ -53,6 +96,20 @@ private:
 
     // reschedule the script for execution. It is assumed the script is not in the list already
     void reschedule_script(script_info *script);
+
+    // REPL stuff
+    struct AP_Scripting::terminal_s &terminal;
+    void doREPL(lua_State *L);
+    void l_print(lua_State *L);
+    void terminal_print(const char *str);
+    int loadline(lua_State *L);
+    int multiline(lua_State *L);
+    int addreturn(lua_State *L);
+    int pushline(lua_State *L, int firstline);
+    int incomplete(lua_State *L, int status);
+    const char * get_prompt(lua_State *L, int firstline);
+    int docall(lua_State *L, int narg, int nres) const;
+    int sandbox_ref;
 
     script_info *scripts; // linked list of scripts to be run, sorted by next run time (soonest first)
 
@@ -67,9 +124,16 @@ private:
     lua_State *lua_state;
 
     const AP_Int32 & _vm_steps;
-    const AP_Int8 & _debug_level;
+    const AP_Int8 & _debug_options;
 
     static void *alloc(void *ud, void *ptr, size_t osize, size_t nsize);
 
     static void *_heap;
+
+    // must be static for use in atpanic
+    static void print_error(MAV_SEVERITY severity);
+    static void set_and_print_new_error_message(MAV_SEVERITY severity, const char *fmt, ...) FMT_PRINTF(2,3);
+    static char *error_msg_buf;
+    static uint8_t print_error_count;
+    static uint32_t last_print_ms;
 };

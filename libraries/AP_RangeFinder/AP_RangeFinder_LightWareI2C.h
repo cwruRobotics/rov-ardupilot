@@ -1,7 +1,7 @@
 #pragma once
 
-#include "RangeFinder.h"
-#include "RangeFinder_Backend.h"
+#include "AP_RangeFinder.h"
+#include "AP_RangeFinder_Backend.h"
 #include <AP_HAL/I2CDevice.h>
 
 #define NUM_SF20_DATA_STREAMS 1
@@ -49,8 +49,8 @@ private:
     void sf20_timer();
 
     // get a reading
-    bool legacy_get_reading(uint16_t &reading_cm);
-    bool sf20_get_reading(uint16_t &reading_cm);
+    bool legacy_get_reading(float &reading_m);
+    bool sf20_get_reading(float &reading_m);
     bool sf20_parse_stream(uint8_t *stream_buf,
                            size_t *p_num_processed_chars,
                            const char *string_identifier,

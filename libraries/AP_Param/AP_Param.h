@@ -39,8 +39,21 @@
   maximum size of embedded parameter file
  */
 #ifndef AP_PARAM_MAX_EMBEDDED_PARAM
-#define AP_PARAM_MAX_EMBEDDED_PARAM 8192
+#if BOARD_FLASH_SIZE <= 1024
+# define AP_PARAM_MAX_EMBEDDED_PARAM 1024
+#else
+# define AP_PARAM_MAX_EMBEDDED_PARAM 8192
 #endif
+#endif
+
+// allow for dynamically added tables when scripting enabled
+#define AP_PARAM_DYNAMIC_ENABLED AP_SCRIPTING_ENABLED
+
+// maximum number of dynamically created tables (from scripts)
+#ifndef AP_PARAM_MAX_DYNAMIC
+#define AP_PARAM_MAX_DYNAMIC 10
+#endif
+#define AP_PARAM_DYNAMIC_KEY_BASE 300
 
 /*
   flags for variables in var_info and group tables
@@ -58,7 +71,7 @@
 
 // don't shift index 0 to index 63. Use this when you know there will be
 // no conflict with the parent
-#define AP_PARAM_NO_SHIFT           (1<<3)
+#define AP_PARAM_FLAG_NO_SHIFT      (1<<3)
 
 // the var_info is a pointer, allowing for dynamic definition of the var_info tree
 #define AP_PARAM_FLAG_INFO_POINTER  (1<<4)
@@ -68,13 +81,16 @@
 // use.
 #define AP_PARAM_FLAG_INTERNAL_USE_ONLY (1<<5)
 
+// hide parameter from param download
+#define AP_PARAM_FLAG_HIDDEN (1<<6)
+
 // keep all flags before the FRAME tags
 
 // vehicle and frame type flags, used to hide parameters when not
 // relevent to a vehicle type. Use AP_Param::set_frame_type_flags() to
 // enable parameters flagged in this way. frame type flags are stored
 // in flags field, shifted by AP_PARAM_FRAME_TYPE_SHIFT.
-#define AP_PARAM_FRAME_TYPE_SHIFT   6
+#define AP_PARAM_FRAME_TYPE_SHIFT   7
 
 // supported frame types for parameters
 #define AP_PARAM_FRAME_COPTER       (1<<0)
@@ -83,6 +99,7 @@
 #define AP_PARAM_FRAME_SUB          (1<<3)
 #define AP_PARAM_FRAME_TRICOPTER    (1<<4)
 #define AP_PARAM_FRAME_HELI         (1<<5)
+#define AP_PARAM_FRAME_BLIMP        (1<<6)
 
 // a variant of offsetof() to work around C++ restrictions.
 // this can only be used when the offset of a variable in a object
@@ -193,6 +210,13 @@ public:
         uint16_t i;
         for (i=0; info[i].type != AP_PARAM_NONE; i++) ;
         _num_vars = i;
+#if AP_PARAM_DYNAMIC_ENABLED
+        _num_vars_base = _num_vars;
+#endif
+        if (_singleton != nullptr) {
+            AP_HAL::panic("AP_Param must be singleton");
+        }
+        _singleton = this;
     }
 
     // empty constructor
@@ -201,8 +225,9 @@ public:
     // a token used for first()/next() state
     typedef struct {
         uint32_t key : 9;
-        uint32_t idx : 5; // offset into array types
+        uint32_t idx : 4; // offset into array types
         uint32_t group_element : 18;
+        uint32_t last_disabled : 1;
     } ParamToken;
 
 
@@ -278,12 +303,20 @@ public:
     /// @return                 true if the variable is found
     static bool set_by_name(const char *name, float value);
 
+    /// gat a value by name, used by scripting
+    ///
+    /// @param  name            The full name of the variable to be found.
+    /// @param  value           A reference to the variable
+    /// @return                 true if the variable is found
+    static bool get(const char *name, float &value);
+
     /// set and save a value by name
     ///
     /// @param  name            The full name of the variable to be found.
     /// @param  value           The new value
     /// @return                 true if the variable is found
     static bool set_and_save_by_name(const char *name, float value);
+    static bool set_and_save_by_name_ifchanged(const char *name, float value);
 
     /// Find a variable by index.
     ///
@@ -294,6 +327,9 @@ public:
     ///
     static AP_Param * find_by_index(uint16_t idx, enum ap_var_type *ptype, ParamToken *token);
 
+    // by-name equivalent of find_by_index()
+    static AP_Param* find_by_name(const char* name, enum ap_var_type *ptype, ParamToken *token);
+
     /// Find a variable by pointer
     ///
     ///
@@ -302,6 +338,14 @@ public:
     static bool find_key_by_pointer_group(const void *ptr, uint16_t vindex, const struct GroupInfo *group_info,
                                           ptrdiff_t offset, uint16_t &key);
     static bool find_key_by_pointer(const void *ptr, uint16_t &key);
+
+    /// Find key of top level group variable by pointer
+    ///
+    ///
+    /// @param  p               Pointer to variable
+    /// @return                 key for variable
+    static bool find_top_level_key_by_pointer(const void *ptr, uint16_t &key);
+
 
     /// Find a object in the top level var_info table
     ///
@@ -321,7 +365,7 @@ public:
     ///
     /// @return                True if the variable was saved successfully.
     ///
-    void save_sync(bool force_save=false);
+    void save_sync(bool force_save, bool send_to_gcs);
 
     /// flush all pending parameter saves
     /// used on reboot
@@ -389,6 +433,13 @@ public:
     // convert old vehicle parameters to new object parameters
     static void         convert_old_parameters(const struct ConversionInfo *conversion_table, uint8_t table_size, uint8_t flags=0);
 
+    /*
+      convert width of a parameter, allowing update to wider scalar
+      values without changing the parameter indexes. This will return
+      true if the parameter was converted from an old parameter value
+    */
+    bool convert_parameter_width(ap_var_type old_ptype);
+    
     // convert a single parameter with scaling
     enum {
         CONVERT_FLAG_REVERSE=1, // handle _REV -> _REVERSED conversion
@@ -396,10 +447,19 @@ public:
     };
     static void         convert_old_parameter(const struct ConversionInfo *info, float scaler, uint8_t flags=0);
 
-    // move old class variables for a class that was sub-classed to one that isn't
-    static void         convert_parent_class(uint8_t param_key, void *object_pointer,
-                                             const struct AP_Param::GroupInfo *group_info);
+    // move all parameters from a class to a new location
+    // is_top_level: Is true if the class had its own top level key, param_key. It is false if the class was a subgroup
+    static void         convert_class(uint16_t param_key, void *object_pointer,
+                                        const struct AP_Param::GroupInfo *group_info,
+                                        uint16_t old_index, uint16_t old_top_element, bool is_top_level);
 
+    /*
+      fetch a parameter value based on the index within a group. This
+      is used to find the old value of a parameter that has been
+      removed from an object.
+    */
+    static bool get_param_by_index(void *obj_ptr, uint8_t idx, ap_var_type old_ptype, void *pvalue);
+    
     /// Erase all variables in EEPROM.
     ///
     static void         erase_all(void);
@@ -413,11 +473,14 @@ public:
 
     /// Returns the next variable in _var_info, recursing into groups
     /// as needed
-    static AP_Param *      next(ParamToken *token, enum ap_var_type *ptype);
+    static AP_Param *      next(ParamToken *token, enum ap_var_type *ptype, bool skip_disabled=false);
 
     /// Returns the next scalar variable in _var_info, recursing into groups
     /// as needed
     static AP_Param *       next_scalar(ParamToken *token, enum ap_var_type *ptype);
+
+    /// get the size of a type in bytes
+    static uint8_t				type_size(enum ap_var_type type);
 
     /// cast a variable to a float given its type
     float                   cast_to_float(enum ap_var_type type) const;
@@ -436,14 +499,21 @@ public:
 
     // return true if the parameter is read-only
     bool is_read_only(void) const;
+
+    // return the persistent top level key for the ParamToken key
+    static uint16_t get_persistent_key(uint16_t key) { return var_info(key).key; }
     
     // count of parameters in tree
     static uint16_t count_parameters(void);
+
+    // invalidate parameter count
+    static void invalidate_count(void);
 
     static void set_hide_disabled_groups(bool value) { _hide_disabled_groups = value; }
 
     // set frame type flags. Used to unhide frame specific parameters
     static void set_frame_type_flags(uint16_t flags_to_set) {
+        invalidate_count();
         _frame_type_flags |= flags_to_set;
     }
 
@@ -467,7 +537,18 @@ public:
                              AP_HAL::BetterStream *port);
 #endif // AP_PARAM_KEY_DUMP
 
+    static AP_Param *get_singleton() { return _singleton; }
+
+#if AP_PARAM_DYNAMIC_ENABLED
+    // allow for dynamically added parameter tables from scripts
+    static bool add_table(uint8_t key, const char *prefix, uint8_t num_params);
+    static bool add_param(uint8_t key, uint8_t param_num, const char *pname, float default_value);
+    static bool load_int32(uint16_t key, uint32_t group_element, int32_t &value);
+#endif
+    
 private:
+    static AP_Param *_singleton;
+
     /// EEPROM header
     ///
     /// This structure is placed at the head of the EEPROM to indicate
@@ -478,6 +559,7 @@ private:
         uint8_t revision;
         uint8_t spare;
     };
+    static_assert(sizeof(struct EEPROM_header) == 4, "Bad EEPROM_header size!");
 
     static uint16_t sentinal_offset;
 
@@ -500,6 +582,7 @@ private:
         uint32_t key_high : 1;
         uint32_t group_element : 18;
     };
+    static_assert(sizeof(struct Param_header) == 4, "Bad Param_header size!");
 
     // number of bits in each level of nesting of groups
     static const uint8_t        _group_level_shift = 6;
@@ -586,20 +669,20 @@ private:
     static bool                 scan(
                                     const struct Param_header *phdr,
                                     uint16_t *pofs);
-    static uint8_t				type_size(enum ap_var_type type);
     static void                 eeprom_write_check(
                                     const void *ptr,
                                     uint16_t ofs,
                                     uint8_t size);
     static AP_Param *           next_group(
-                                    uint16_t vindex, 
+                                    const uint16_t vindex,
                                     const struct GroupInfo *group_info,
                                     bool *found_current,
-                                    uint32_t group_base,
-                                    uint8_t group_shift,
-                                    ptrdiff_t group_offset,
+                                    const uint32_t group_base,
+                                    const uint8_t group_shift,
+                                    const ptrdiff_t group_offset,
                                     ParamToken *token,
-                                    enum ap_var_type *ptype);
+                                    enum ap_var_type *ptype,
+                                    bool skip_disabled);
 
     // find a default value given a pointer to a default value in flash
     static float get_default_value(const AP_Param *object_ptr, const float *def_value_ptr);
@@ -625,9 +708,28 @@ private:
     void send_parameter(const char *name, enum ap_var_type param_header_type, uint8_t idx) const;
 
     static StorageAccess        _storage;
+    static StorageAccess        _storage_bak;
     static uint16_t             _num_vars;
     static uint16_t             _parameter_count;
+    static uint16_t             _count_marker;
+    static uint16_t             _count_marker_done;
+    static HAL_Semaphore        _count_sem;
     static const struct Info *  _var_info;
+
+#if AP_PARAM_DYNAMIC_ENABLED
+    // allow for a dynamically allocated var table
+    static uint16_t             _num_vars_base;
+    static struct Info *        _var_info_dynamic;
+    static const struct AP_Param::Info &var_info(uint16_t i) {
+        return i<_num_vars_base? _var_info[i] : _var_info_dynamic[i-_num_vars_base];
+    }
+    static uint8_t _dynamic_table_sizes[AP_PARAM_MAX_DYNAMIC];
+#else
+    // simple static var table in flash
+    static const struct Info &var_info(uint16_t i) {
+        return _var_info[i];
+    }
+#endif
 
     /*
       list of overridden values from load_defaults_file()
@@ -654,11 +756,15 @@ private:
         AP_Param *param;
         bool force_save;
     };
-    static ObjectBuffer<struct param_save> save_queue;
+    static ObjectBuffer_TS<struct param_save> save_queue;
     static bool registered_save_handler;
 
     // background function for saving parameters
     void save_io_handler(void);
+};
+
+namespace AP {
+    AP_Param *param();
 };
 
 /// Template class for scalar variables.
@@ -687,6 +793,14 @@ public:
         _value = v;
     }
 
+    // set a parameter that is an ENABLE param
+    void set_enable(const T &v) {
+        if (v != _value) {
+            invalidate_count();
+        }
+        _value = v;
+    }
+    
     /// Sets if the parameter is unconfigured
     ///
     void set_default(const T &v) {
@@ -723,7 +837,10 @@ public:
     /// value separately, as otherwise the value in EEPROM won't be
     /// updated correctly.
     void set_and_save_ifchanged(const T &v) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
         if (v == _value) {
+#pragma GCC diagnostic pop
             return;
         }
         set(v);
@@ -822,6 +939,23 @@ public:
         save(force);
     }
 
+    /// Combined set and save, but only does the save if the value is
+    /// different from the current ram value, thus saving us a
+    /// scan(). This should only be used where we have not set() the
+    /// value separately, as otherwise the value in EEPROM won't be
+    /// updated correctly.
+    void set_and_save_ifchanged(const T &v) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
+        if (_value == v) {
+#pragma GCC diagnostic pop
+            return;
+        }
+        set(v);
+        save(true);
+    }
+
+
     /// Conversion to T returns a reference to the value.
     ///
     /// This allows the class to be used in many situations where the value would be legal.
@@ -915,3 +1049,24 @@ AP_PARAMDEF(int32_t, Int32, AP_PARAM_INT32);  // defines AP_Int32
 // _suffix is the suffix on the AP_* type name
 // _pt is the enum ap_var_type type
 #define AP_PARAMDEFV(_t, _suffix, _pt)   typedef AP_ParamV<_t, _pt> AP_ ## _suffix;
+
+/*
+  template class for enum types based on AP_Int8
+ */
+template<typename eclass>
+class AP_Enum : public AP_Int8
+{
+public:
+    operator const eclass () const {
+        return (eclass)_value;
+    }
+};
+
+template<typename eclass>
+class AP_Enum16 : public AP_Int16
+{
+public:
+    operator const eclass () const {
+        return (eclass)_value;
+    }
+};
