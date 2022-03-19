@@ -18,6 +18,7 @@
 
 #include <AC_Fence/AC_Fence.h>
 #include <AP_ADSB/AP_ADSB.h>
+#include <AP_AdvancedFailsafe/AP_AdvancedFailsafe.h>
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Arming/AP_Arming.h>
@@ -49,6 +50,13 @@
 #include <AP_RCTelemetry/AP_CRSF_Telem.h>
 #include <AP_AIS/AP_AIS.h>
 #include <AP_Filesystem/AP_Filesystem.h>
+#include <AP_Frsky_Telem/AP_Frsky_Telem.h>
+#include <RC_Channel/RC_Channel.h>
+#include <AP_VisualOdom/AP_VisualOdom.h>
+
+#include "MissionItemProtocol_Waypoints.h"
+#include "MissionItemProtocol_Rally.h"
+#include "MissionItemProtocol_Fence.h"
 
 #include <stdio.h>
 
@@ -156,14 +164,20 @@ bool GCS_MAVLINK::init(uint8_t instance)
         return false;
     }
     
-    if (mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLink2) {
+    if (mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLink2 ||
+        mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLinkHL) {
         // load signing key
         load_signing_key();
     } else if (status) {
         // user has asked to only send MAVLink1
         status->flags |= MAVLINK_STATUS_FLAG_OUT_MAVLINK1;
     }
-    
+
+#if HAL_HIGH_LATENCY2_ENABLED
+    if (mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLinkHL) {
+        is_high_latency_link = true;
+    }
+#endif
     return true;
 }
 
@@ -930,8 +944,9 @@ bool GCS_MAVLINK::should_send_message_in_delay_callback(const ap_message id) con
     // microseconds to return!
 
     switch (id) {
-    case MSG_HEARTBEAT:
     case MSG_NEXT_PARAM:
+    case MSG_HEARTBEAT:
+    case MSG_HIGH_LATENCY2:
     case MSG_AUTOPILOT_VERSION:
         return true;
     default:
@@ -1051,6 +1066,7 @@ bool GCS_MAVLINK::do_try_send_message(const ap_message id)
     if (telemetry_delayed()) {
         return false;
     }
+    WITH_SEMAPHORE(comm_chan_lock(chan));
 #if GCS_DEBUG_SEND_MESSAGE_TIMINGS
     void *data = hal.scheduler->disable_interrupts_save();
     uint32_t start_send_message_us = AP_HAL::micros();
@@ -1396,7 +1412,7 @@ bool GCS_MAVLINK::set_ap_message_interval(enum ap_message id, uint16_t interval_
 // mavlink work!)
 void GCS_MAVLINK::send_message(enum ap_message id)
 {
-    if (id == MSG_HEARTBEAT) {
+    if (id == MSG_HEARTBEAT || id == MSG_HIGH_LATENCY2) {
         save_signing_timestamp(false);
         // update the mask of all streaming channels
         if (is_streaming()) {
@@ -1419,7 +1435,8 @@ void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
     }
     if (!(status.flags & MAVLINK_STATUS_FLAG_IN_MAVLINK1) &&
         (status.flags & MAVLINK_STATUS_FLAG_OUT_MAVLINK1) &&
-        AP::serialmanager().get_mavlink_protocol(chan) == AP_SerialManager::SerialProtocol_MAVLink2) {
+        (AP::serialmanager().get_mavlink_protocol(chan) == AP_SerialManager::SerialProtocol_MAVLink2 ||
+         AP::serialmanager().get_mavlink_protocol(chan) == AP_SerialManager::SerialProtocol_MAVLinkHL)) {
         // if we receive any MAVLink2 packets on a connection
         // currently sending MAVLink1 then switch to sending
         // MAVLink2
@@ -2058,6 +2075,8 @@ void GCS_MAVLINK::service_statustext(void)
     // want to move idx.
     const uint16_t payload_size = PAYLOAD_SIZE(chan, STATUSTEXT);
     for (uint8_t idx=0; idx<_statustext_queue.available(); ) {
+        WITH_SEMAPHORE(comm_chan_lock(chan));
+
         if (txspace() < payload_size) {
             break;
         }
@@ -3399,6 +3418,28 @@ MAV_RESULT GCS_MAVLINK::handle_fixed_mag_cal_yaw(const mavlink_command_long_t &p
 #endif
 }
 
+/*
+  handle MAV_CMD_CAN_FORWARD
+ */
+MAV_RESULT GCS_MAVLINK::handle_can_forward(const mavlink_command_long_t &packet, const mavlink_message_t &msg)
+{
+#if HAL_CANMANAGER_ENABLED
+    return AP::can().handle_can_forward(chan, packet, msg) ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
+#else
+    return MAV_RESULT_UNSUPPORTED;
+#endif
+}
+
+/*
+  handle CAN_FRAME messages
+ */
+void GCS_MAVLINK::handle_can_frame(const mavlink_message_t &msg) const
+{
+#if HAL_CANMANAGER_ENABLED
+    AP::can().handle_can_frame(msg);
+#endif
+}
+
 void GCS_MAVLINK::handle_distance_sensor(const mavlink_message_t &msg)
 {
     RangeFinder *rangefinder = AP::rangefinder();
@@ -3690,6 +3731,17 @@ void GCS_MAVLINK::handle_common_message(const mavlink_message_t &msg)
     case MAVLINK_MSG_ID_NAMED_VALUE_FLOAT:
         handle_named_value(msg);
         break;
+
+    case MAVLINK_MSG_ID_CAN_FRAME:
+    case MAVLINK_MSG_ID_CANFD_FRAME:
+        handle_can_frame(msg);
+        break;
+
+    case MAVLINK_MSG_ID_CAN_FILTER_MODIFY:
+#if HAL_CANMANAGER_ENABLED
+        AP::can().handle_can_filter_modify(msg);
+#endif
+        break;
     }
 
 }
@@ -3800,7 +3852,7 @@ void GCS_MAVLINK::send_banner()
 
 void GCS_MAVLINK::send_simstate() const
 {
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#if AP_SIM_ENABLED
     SITL::SIM *sitl = AP::sitl();
     if (sitl == nullptr) {
         return;
@@ -3811,7 +3863,7 @@ void GCS_MAVLINK::send_simstate() const
 
 void GCS_MAVLINK::send_sim_state() const
 {
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#if AP_SIM_ENABLED
     SITL::SIM *sitl = AP::sitl();
     if (sitl == nullptr) {
         return;
@@ -4009,7 +4061,7 @@ MAV_RESULT GCS_MAVLINK::handle_command_preflight_can(const mavlink_command_long_
             }
             case AP_CANManager::Driver_Type_CANTester: {
 // To be replaced with macro saying if KDECAN library is included
-#if (APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_ArduSub)) && (HAL_MAX_CAN_PROTOCOL_DRIVERS > 1 && !HAL_MINIMIZE_FEATURES)
+#if (APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_ArduSub)) && (HAL_MAX_CAN_PROTOCOL_DRIVERS > 1 && !HAL_MINIMIZE_FEATURES && HAL_ENABLE_CANTESTER)
                 CANTester *cantester = CANTester::get_cantester(i);
 
                 if (cantester != nullptr) {
@@ -4311,6 +4363,12 @@ MAV_RESULT GCS_MAVLINK::handle_command_long_packet(const mavlink_command_long_t 
         result = handle_preflight_reboot(packet);
         break;
 
+#if HAL_HIGH_LATENCY2_ENABLED
+    case MAV_CMD_CONTROL_HIGH_LATENCY:
+        result = handle_control_high_latency(packet);
+        break;
+#endif // HAL_HIGH_LATENCY2_ENABLED
+
     case MAV_CMD_DO_START_MAG_CAL:
     case MAV_CMD_DO_ACCEPT_MAG_CAL:
     case MAV_CMD_DO_CANCEL_MAG_CAL: {
@@ -4451,7 +4509,7 @@ MAV_RESULT GCS_MAVLINK::handle_command_long_packet(const mavlink_command_long_t 
     case MAV_CMD_FIXED_MAG_CAL_YAW:
         result = handle_fixed_mag_cal_yaw(packet);
         break;
-        
+
     default:
         result = MAV_RESULT_UNSUPPORTED;
         break;
@@ -4538,7 +4596,18 @@ void GCS_MAVLINK::handle_command_long(const mavlink_message_t &msg)
 
     hal.util->persistent_data.last_mavlink_cmd = packet.command;
 
-    const MAV_RESULT result = handle_command_long_packet(packet);
+    MAV_RESULT result;
+
+    // special handling of messages that need the mavlink_message_t
+    switch (packet.command) {
+    case MAV_CMD_CAN_FORWARD:
+        result = handle_can_forward(packet, msg);
+        break;
+
+    default:
+         result = handle_command_long_packet(packet);
+         break;
+    }
 
     // send ACK or NAK
     mavlink_msg_command_ack_send(chan, packet.command, result,
@@ -5641,7 +5710,15 @@ void GCS_MAVLINK::initialise_message_intervals_from_streamrates()
     for (uint8_t i=0; all_stream_entries[i].ap_message_ids != nullptr; i++) {
         initialise_message_intervals_for_stream(all_stream_entries[i].stream_id);
     }
+#if HAL_HIGH_LATENCY2_ENABLED
+    if (!is_high_latency_link) {
+        set_mavlink_message_id_interval(MAVLINK_MSG_ID_HEARTBEAT, 1000);
+    } else {
+        set_mavlink_message_id_interval(MAVLINK_MSG_ID_HIGH_LATENCY2, 5000);
+    }
+#else
     set_mavlink_message_id_interval(MAVLINK_MSG_ID_HEARTBEAT, 1000);
+#endif
 }
 
 bool GCS_MAVLINK::get_default_interval_for_ap_message(const ap_message id, uint16_t &interval) const
@@ -5649,6 +5726,12 @@ bool GCS_MAVLINK::get_default_interval_for_ap_message(const ap_message id, uint1
     if (id == MSG_HEARTBEAT) {
         // handle heartbeat requests as a special case because heartbeat is not "streamed"
         interval = 1000;
+        return true;
+    }
+
+    if (id == MSG_HIGH_LATENCY2) {
+        // handle HL2 requests as a special case because HL2 is not "streamed"
+        interval = 5000;
         return true;
     }
 
@@ -5887,7 +5970,7 @@ uint64_t GCS_MAVLINK::capabilities() const
         MAV_PROTOCOL_CAPABILITY_COMPASS_CALIBRATION;
 
     AP_SerialManager::SerialProtocol mavlink_protocol = AP::serialmanager().get_mavlink_protocol(chan);
-    if (mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLink2) {
+    if (mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLink2 || mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLinkHL) {
         ret |= MAV_PROTOCOL_CAPABILITY_MAVLINK2;
     }
 
@@ -6048,5 +6131,30 @@ int8_t GCS_MAVLINK::high_latency_air_temperature() const
 #endif
 
     return INT8_MIN;
+}
+
+/*
+  handle a MAV_CMD_CONTROL_HIGH_LATENCY command 
+
+  Enable or disable any marked (via SERIALn_PROTOCOL) high latency connections
+ */
+MAV_RESULT GCS_MAVLINK::handle_control_high_latency(const mavlink_command_long_t &packet)
+{
+    // high latency mode is enabled if param1=1 or disabled if param1=0
+    if (is_equal(packet.param1, 0.0f)) {
+        gcs().enable_high_latency_connections(false);
+    } else if (is_equal(packet.param1, 1.0f)) {
+        gcs().enable_high_latency_connections(true);
+    } else {
+        return MAV_RESULT_FAILED;
+    }
+
+    // send to all other mavlink components with same sysid
+    mavlink_command_long_t hl_msg{};
+    hl_msg.command = MAV_CMD_CONTROL_HIGH_LATENCY;
+    hl_msg.param1 = packet.param1;
+    GCS_MAVLINK::send_to_components(MAVLINK_MSG_ID_COMMAND_LONG, (char*)&hl_msg, sizeof(hl_msg));
+
+    return MAV_RESULT_ACCEPTED;
 }
 #endif // HAL_HIGH_LATENCY2_ENABLED

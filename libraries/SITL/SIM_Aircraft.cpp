@@ -16,12 +16,13 @@
   parent class for aircraft simulators
 */
 
+#define ALLOW_DOUBLE_MATH_FUNCTIONS
+
 #include "SIM_Aircraft.h"
 
 #include <stdio.h>
 #include <sys/time.h>
 #include <unistd.h>
-
 
 #if defined(__CYGWIN__) || defined(__CYGWIN64__)
 #include <windows.h>
@@ -38,6 +39,8 @@
 #include <AP_BoardConfig/AP_BoardConfig.h>
 
 using namespace SITL;
+
+extern const AP_HAL::HAL& hal;
 
 /*
   parent class for all simulator types
@@ -108,8 +111,8 @@ float Aircraft::ground_height_difference() const
     if (sitl &&
         terrain != nullptr &&
         sitl->terrain_enable &&
-        terrain->height_amsl(home, h1, false) &&
-        terrain->height_amsl(location, h2, false)) {
+        terrain->height_amsl(home, h1) &&
+        terrain->height_amsl(location, h2)) {
         h2 += local_ground_level;
         return h2 - h1;
     }
@@ -280,7 +283,13 @@ void Aircraft::sync_frame_time(void)
     }
     if (sleep_debt_us > min_sleep_time) {
         // sleep if we have built up a debt of min_sleep_tim
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
         usleep(sleep_debt_us);
+#elif CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
+        hal.scheduler->delay_microseconds(sleep_debt_us);
+#else
+        // ??
+#endif
         sleep_debt_us -= (get_wall_time_us() - now);
     }
     last_wall_time_us = get_wall_time_us();
@@ -418,26 +427,9 @@ void Aircraft::fill_fdm(struct sitl_fdm &fdm)
     if (ahrs_orientation != nullptr) {
         enum Rotation imu_rotation = (enum Rotation)ahrs_orientation->get();
         if (imu_rotation != last_imu_rotation) {
-            // Surprisingly, Matrix3<T>::from_rotation(ROTATION_CUSTOM) is the identity matrix
-            // so we must deal with that here
-            if (imu_rotation == ROTATION_CUSTOM) {
-                if ((custom_roll == nullptr) || (custom_pitch == nullptr) || (custom_yaw == nullptr)) {
-                    enum ap_var_type ptype;
-                    custom_roll = (AP_Float *)AP_Param::find("AHRS_CUSTOM_ROLL", &ptype);
-                    custom_pitch = (AP_Float *)AP_Param::find("AHRS_CUSTOM_PIT", &ptype);
-                    custom_yaw = (AP_Float *)AP_Param::find("AHRS_CUSTOM_YAW", &ptype);
-                }
-                if ((custom_roll != nullptr) && (custom_pitch != nullptr) && (custom_yaw != nullptr)) {
-                    sitl->ahrs_rotation.from_euler(radians(*custom_roll), radians(*custom_pitch), radians(*custom_yaw));
-                    sitl->ahrs_rotation_inv = sitl->ahrs_rotation.transposed();
-                } else {
-                    AP_HAL::panic("could not find one or more of parameters AHRS_CUSTOM_ROLL/PITCH/YAW");
-                }
-            } else {
-                sitl->ahrs_rotation.from_rotation(imu_rotation);
-                sitl->ahrs_rotation_inv = sitl->ahrs_rotation.transposed();
-                last_imu_rotation = imu_rotation;
-            }
+            sitl->ahrs_rotation.from_rotation(imu_rotation);
+            sitl->ahrs_rotation_inv = sitl->ahrs_rotation.transposed();
+            last_imu_rotation = imu_rotation;
         }
         if (imu_rotation != ROTATION_NONE) {
             Matrix3f m = dcm;
@@ -553,6 +545,7 @@ float Aircraft::rangefinder_range() const
 }
 
 
+// potentially replace this with a call to AP_HAL::Util::get_hw_rtc
 uint64_t Aircraft::get_wall_time_us() const
 {
 #if defined(__CYGWIN__) || defined(__CYGWIN64__)
@@ -566,10 +559,12 @@ uint64_t Aircraft::get_wall_time_us() const
     last_ret_us += (uint64_t)((now - tPrev)*1000UL);
     tPrev = now;
     return last_ret_us;
-#else
+#elif CONFIG_HAL_BOARD == HAL_BOARD_SITL
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return uint64_t(ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000ULL);
+#else
+    return AP_HAL::micros64();
 #endif
 }
 

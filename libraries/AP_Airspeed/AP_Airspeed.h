@@ -19,7 +19,7 @@ class AP_Airspeed_Backend;
 #endif
 
 #ifndef AP_AIRSPEED_AUTOCAL_ENABLE
-#define AP_AIRSPEED_AUTOCAL_ENABLE !defined(HAL_BUILD_AP_PERIPH)
+#define AP_AIRSPEED_AUTOCAL_ENABLE AP_AIRSPEED_ENABLED
 #endif
 
 #ifndef HAL_MSP_AIRSPEED_ENABLED
@@ -266,12 +266,12 @@ private:
     // returns 0 if the sensor is not enabled
     float get_pressure(uint8_t i);
 
-    // get the failure health probability
-    float get_health_failure_probability(uint8_t i) const {
+    // get the health probability
+    float get_health_probability(uint8_t i) const {
         return state[i].failures.health_probability;
     }
-    float get_health_failure_probability(void) const {
-        return get_health_failure_probability(primary);
+    float get_health_probability(void) const {
+        return get_health_probability(primary);
     }
 
     void update_calibration(uint8_t i, float raw_pressure);

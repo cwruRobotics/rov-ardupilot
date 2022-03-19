@@ -22,6 +22,7 @@
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_RTC/AP_RTC.h>
 #include <climits>
+#include <AP_SerialManager/AP_SerialManager.h>
 
 #include "AP_GPS_NOVA.h"
 #include "AP_GPS_ERB.h"
@@ -36,6 +37,9 @@
 #include "AP_GPS_MSP.h"
 #include "AP_GPS_ExternalAHRS.h"
 #include "GPS_Backend.h"
+#if HAL_SIM_GPS_ENABLED
+#include "AP_GPS_SITL.h"
+#endif
 
 #if HAL_ENABLE_LIBUAVCAN_DRIVERS
 #include <AP_CANManager/AP_CANManager.h>
@@ -654,6 +658,13 @@ void AP_GPS::detect_instance(uint8_t instance)
         new_gps = new AP_GPS_NOVA(*this, state[instance], _port[instance]);
         break;
 #endif //AP_GPS_NOVA_ENABLED
+
+#if HAL_SIM_GPS_ENABLED
+    case GPS_TYPE_SITL:
+        new_gps = new AP_GPS_SITL(*this, state[instance], _port[instance]);
+        break;
+#endif  // HAL_SIM_GPS_ENABLED
+
     default:
         break;
     }

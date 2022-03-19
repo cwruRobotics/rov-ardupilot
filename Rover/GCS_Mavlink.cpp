@@ -384,6 +384,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("RAW_SENS", 0, GCS_MAVLINK_Parameters, streamRates[0],  1),
 
@@ -393,6 +394,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXT_STAT", 1, GCS_MAVLINK_Parameters, streamRates[1],  1),
 
@@ -402,6 +404,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("RC_CHAN",  2, GCS_MAVLINK_Parameters, streamRates[2],  1),
 
@@ -411,6 +414,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("RAW_CTRL", 3, GCS_MAVLINK_Parameters, streamRates[3],  1),
 
@@ -420,6 +424,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("POSITION", 4, GCS_MAVLINK_Parameters, streamRates[4],  1),
 
@@ -429,6 +434,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXTRA1",   5, GCS_MAVLINK_Parameters, streamRates[5],  1),
 
@@ -438,6 +444,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXTRA2",   6, GCS_MAVLINK_Parameters, streamRates[6],  1),
 
@@ -447,6 +454,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXTRA3",   7, GCS_MAVLINK_Parameters, streamRates[7],  1),
 
@@ -456,6 +464,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("PARAMS",   8, GCS_MAVLINK_Parameters, streamRates[8],  10),
 
@@ -465,6 +474,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("ADSB",   9, GCS_MAVLINK_Parameters, streamRates[9],  0),
 
@@ -1055,7 +1065,7 @@ uint8_t GCS_MAVLINK_Rover::high_latency_tgt_heading() const
         // need to convert -180->180 to 0->360/2
         return wrap_360(control_mode->wp_bearing()) / 2;
     }
-    return 0;      
+    return 0;
 }
     
 uint16_t GCS_MAVLINK_Rover::high_latency_tgt_dist() const
@@ -1065,7 +1075,7 @@ uint16_t GCS_MAVLINK_Rover::high_latency_tgt_dist() const
         // return units are dm
         return MIN((control_mode->get_distance_to_destination()) / 10, UINT16_MAX);
     }
-    return 0;  
+    return 0;
 }
 
 uint8_t GCS_MAVLINK_Rover::high_latency_tgt_airspeed() const
@@ -1084,7 +1094,7 @@ uint8_t GCS_MAVLINK_Rover::high_latency_wind_speed() const
         // return units are m/s*5
         return MIN(rover.g2.windvane.get_true_wind_speed() * 5, UINT8_MAX);
     }
-    return 0; 
+    return 0;
 }
 
 uint8_t GCS_MAVLINK_Rover::high_latency_wind_direction() const
@@ -1093,6 +1103,6 @@ uint8_t GCS_MAVLINK_Rover::high_latency_wind_direction() const
         // return units are deg/2
         return wrap_360(degrees(rover.g2.windvane.get_true_wind_direction_rad())) / 2;
     }
-    return 0; 
+    return 0;
 }
 #endif // HAL_HIGH_LATENCY2_ENABLED

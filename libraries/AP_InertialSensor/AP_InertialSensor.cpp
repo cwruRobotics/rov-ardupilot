@@ -746,7 +746,7 @@ bool AP_InertialSensor::register_accel(uint8_t &instance, uint16_t raw_sample_ra
 
     _accel_id[_accel_count].set((int32_t) id);
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL || (CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS && AP_SIM_ENABLED)
         // assume this is the same sensor and save its ID to allow seamless
         // transition from when we didn't have the IDs.
         _accel_id_ok[_accel_count] = true;
@@ -2133,11 +2133,7 @@ bool AP_InertialSensor::get_fixed_mount_accel_cal_sample(uint8_t sample_num, Vec
         return false;
     }
     _accel_calibrator[_acc_body_aligned-1].get_sample_corrected(sample_num, ret);
-    if (_board_orientation == ROTATION_CUSTOM && _custom_rotation) {
-        ret = *_custom_rotation * ret;
-    } else {
-        ret.rotate(_board_orientation);
-    }
+    ret.rotate(_board_orientation);
     return true;
 }
 
@@ -2162,11 +2158,7 @@ bool AP_InertialSensor::get_primary_accel_cal_sample_avg(uint8_t sample_num, Vec
     }
     avg /= count;
     ret = avg;
-    if (_board_orientation == ROTATION_CUSTOM && _custom_rotation) {
-        ret = *_custom_rotation * ret;
-    } else {
-        ret.rotate(_board_orientation);
-    }
+    ret.rotate(_board_orientation);
     return true;
 }
 

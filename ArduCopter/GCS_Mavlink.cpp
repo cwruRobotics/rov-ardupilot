@@ -380,6 +380,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("RAW_SENS", 0, GCS_MAVLINK_Parameters, streamRates[0],  0),
 
@@ -389,6 +390,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXT_STAT", 1, GCS_MAVLINK_Parameters, streamRates[1],  0),
 
@@ -398,6 +400,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("RC_CHAN",  2, GCS_MAVLINK_Parameters, streamRates[2],  0),
 
@@ -407,6 +410,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("RAW_CTRL", 3, GCS_MAVLINK_Parameters, streamRates[3],  0),
 
@@ -416,15 +420,17 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("POSITION", 4, GCS_MAVLINK_Parameters, streamRates[4],  0),
 
     // @Param: EXTRA1
     // @DisplayName: Extra data type 1 stream rate to ground station
-    // @Description: Stream rate of ATTITUDE, SIMSTATE (SITL only), AHRS2 and PID_TUNING to ground station
+    // @Description: Stream rate of ATTITUDE, SIMSTATE (SIM only), AHRS2 and PID_TUNING to ground station
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXTRA1",   5, GCS_MAVLINK_Parameters, streamRates[5],  0),
 
@@ -434,6 +440,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXTRA2",   6, GCS_MAVLINK_Parameters, streamRates[6],  0),
 
@@ -443,6 +450,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("EXTRA3",   7, GCS_MAVLINK_Parameters, streamRates[7],  0),
 
@@ -452,6 +460,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("PARAMS",   8, GCS_MAVLINK_Parameters, streamRates[8],  0),
 
@@ -461,6 +470,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @Units: Hz
     // @Range: 0 50
     // @Increment: 1
+    // @RebootRequired: True
     // @User: Advanced
     AP_GROUPINFO("ADSB",   9, GCS_MAVLINK_Parameters, streamRates[9],  0),
 AP_GROUPEND
@@ -995,30 +1005,24 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_long_packet(const mavlink_command_
 
 MAV_RESULT GCS_MAVLINK_Copter::handle_command_pause_continue(const mavlink_command_int_t &packet)
 {
-#if MODE_AUTO_ENABLED
-    if (copter.flightmode->mode_number() != Mode::Number::AUTO) {
-        // only supported in AUTO mode
+    // requested pause
+    if ((uint8_t) packet.param1 == 0) {
+        if (copter.flightmode->pause()) {
+            return MAV_RESULT_ACCEPTED;
+        }
+        send_text(MAV_SEVERITY_INFO, "Failed to pause");
         return MAV_RESULT_FAILED;
     }
 
-    // requested pause from GCS
-    if ((int8_t) packet.param1 == 0) {
-        copter.mode_auto.mission.stop();
-        copter.mode_auto.loiter_start();
-        gcs().send_text(MAV_SEVERITY_INFO, "Paused mission");
-        return MAV_RESULT_ACCEPTED;
+    // requested resume
+    if ((uint8_t) packet.param1 == 1) {
+        if (copter.flightmode->resume()) {
+            return MAV_RESULT_ACCEPTED;
+        }
+        send_text(MAV_SEVERITY_INFO, "Failed to resume");
+        return MAV_RESULT_FAILED;
     }
-
-    // requested resume from GCS
-    if ((int8_t) packet.param1 == 1) {
-        copter.mode_auto.mission.resume();
-        gcs().send_text(MAV_SEVERITY_INFO, "Resumed mission");
-        return MAV_RESULT_ACCEPTED;
-    }
-#endif
-
-    // fail pause or continue
-    return MAV_RESULT_FAILED;
+    return MAV_RESULT_DENIED;
 }
 
 void GCS_MAVLINK_Copter::handle_mount_message(const mavlink_message_t &msg)
@@ -1397,17 +1401,13 @@ void GCS_MAVLINK_Copter::handleMessage(const mavlink_message_t &msg)
         mavlink_set_home_position_t packet;
         mavlink_msg_set_home_position_decode(&msg, &packet);
         if ((packet.latitude == 0) && (packet.longitude == 0) && (packet.altitude == 0)) {
-            if (!copter.set_home_to_current_location(true)) {
-                // silently ignored
-            }
+            IGNORE_RETURN(copter.set_home_to_current_location(true));
         } else {
             Location new_home_loc;
             new_home_loc.lat = packet.latitude;
             new_home_loc.lng = packet.longitude;
             new_home_loc.alt = packet.altitude / 10;
-            if (!copter.set_home(new_home_loc, true)) {
-                // silently ignored
-            }
+            IGNORE_RETURN(copter.set_home(new_home_loc, true));
         }
         break;
     }

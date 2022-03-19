@@ -17,6 +17,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_BattMonitor/AP_BattMonitor.h>
+#include <AP_Compass/AP_Compass.h>
 #include <AP_Notify/AP_Notify.h>
 #include <GCS_MAVLink/GCS.h>
 #include <GCS_MAVLink/GCS_MAVLink.h>
@@ -796,7 +797,7 @@ bool AP_Arming::servo_checks(bool report) const
     bool check_passed = true;
     for (uint8_t i = 0; i < NUM_SERVO_CHANNELS; i++) {
         const SRV_Channel *c = SRV_Channels::srv_channel(i);
-        if (c == nullptr || c->get_function() == SRV_Channel::k_none) {
+        if (c == nullptr || c->get_function() <= SRV_Channel::k_none) {
             continue;
         }
 
@@ -1362,6 +1363,10 @@ bool AP_Arming::arm(AP_Arming::Method method, const bool do_arming_checks)
     } else {
         AP::logger().arming_failure();
         armed = false;
+    }
+
+    if (armed && do_arming_checks && checks_to_perform == 0) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Warning: Arming Checks Disabled");
     }
 
     return armed;
