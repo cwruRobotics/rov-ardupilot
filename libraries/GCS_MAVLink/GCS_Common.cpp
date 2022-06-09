@@ -48,6 +48,7 @@
 #include <AP_Winch/AP_Winch.h>
 #include <AP_OSD/AP_OSD.h>
 #include <AP_RCTelemetry/AP_CRSF_Telem.h>
+#include <AP_RPM/AP_RPM.h>
 #include <AP_AIS/AP_AIS.h>
 #include <AP_Filesystem/AP_Filesystem.h>
 #include <AP_Frsky_Telem/AP_Frsky_Telem.h>
@@ -258,7 +259,7 @@ void GCS_MAVLINK::send_battery_status(const uint8_t instance) const
         // for battery monitors that cannot provide voltages for individual cells the battery's total voltage is put into the first cell
         // if the total voltage cannot fit into a single field, the remainder into subsequent fields.
         // the GCS can then recover the pack voltage by summing all non ignored cell values an we can report a pack up to 655.34 V
-        float voltage = battery.voltage(instance) * 1e3f;
+        float voltage = battery.gcs_voltage(instance) * 1e3f;
         for (uint8_t i = 0; i < MAVLINK_MSG_BATTERY_STATUS_FIELD_VOLTAGES_LEN; i++) {
           if (voltage < 0.001f) {
               // too small to send to the GCS, set it to the no cell value
@@ -810,7 +811,7 @@ void GCS_MAVLINK::handle_mission_item(const mavlink_message_t &msg)
             // add home alt if needed
             handle_change_alt_request(cmd);
 
-            // verify we recevied the command
+            // verify we received the command
             result = MAV_MISSION_ACCEPTED;
         }
         send_mission_ack(msg, MAV_MISSION_TYPE_MISSION, result);
@@ -891,7 +892,6 @@ ap_message GCS_MAVLINK::mavlink_id_to_ap_message_id(const uint32_t mavlink_id) c
         { MAVLINK_MSG_ID_CAMERA_FEEDBACK,       MSG_CAMERA_FEEDBACK},
         { MAVLINK_MSG_ID_MOUNT_STATUS,          MSG_MOUNT_STATUS},
         { MAVLINK_MSG_ID_OPTICAL_FLOW,          MSG_OPTICAL_FLOW},
-        { MAVLINK_MSG_ID_GIMBAL_REPORT,         MSG_GIMBAL_REPORT},
         { MAVLINK_MSG_ID_MAG_CAL_PROGRESS,      MSG_MAG_CAL_PROGRESS},
         { MAVLINK_MSG_ID_MAG_CAL_REPORT,        MSG_MAG_CAL_REPORT},
         { MAVLINK_MSG_ID_EKF_STATUS_REPORT,     MSG_EKF_STATUS_REPORT},
@@ -2717,22 +2717,47 @@ bool GCS_MAVLINK::telemetry_delayed() const
  */
 void GCS_MAVLINK::send_servo_output_raw()
 {
-    uint16_t values[16] {};
-    hal.rcout->read(values, 16);
+    const uint32_t enabled_mask = ~SRV_Channels::get_output_channel_mask(SRV_Channel::k_GPIO);
+    if (enabled_mask == 0) {
+        return;
+    }
 
-    for (uint8_t i=0; i<16; i++) {
+#if NUM_SERVO_CHANNELS >= 17
+    static const uint8_t max_channels = 32;
+#else
+    static const uint8_t max_channels = 16;
+#endif
+
+    uint16_t values[max_channels] {};
+    hal.rcout->read(values, max_channels);
+    for (uint8_t i=0; i<max_channels; i++) {
         if (values[i] == 65535) {
             values[i] = 0;
         }
-    }    
-    mavlink_msg_servo_output_raw_send(
-            chan,
-            AP_HAL::micros(),
-            0,     // port
-            values[0],  values[1],  values[2],  values[3],
-            values[4],  values[5],  values[6],  values[7],
-            values[8],  values[9],  values[10], values[11],
-            values[12], values[13], values[14], values[15]);
+    }
+    if ((enabled_mask & 0xFFFF) != 0) {
+        mavlink_msg_servo_output_raw_send(
+                chan,
+                AP_HAL::micros(),
+                0,     // port
+                values[0],  values[1],  values[2],  values[3],
+                values[4],  values[5],  values[6],  values[7],
+                values[8],  values[9],  values[10], values[11],
+                values[12], values[13], values[14], values[15]);
+    }
+
+#if NUM_SERVO_CHANNELS >= 17
+    if ((enabled_mask & 0xFFFF0000) != 0) {
+        mavlink_msg_servo_output_raw_send(
+                chan,
+                AP_HAL::micros(),
+                1,     // port
+                values[16],  values[17],  values[18],  values[19],
+                values[20],  values[21],  values[22],  values[23],
+                values[24],  values[25],  values[26], values[27],
+                values[28], values[29], values[30], values[31]);
+    }
+#endif
 }
 
 
@@ -3329,10 +3354,13 @@ void GCS_MAVLINK::handle_vision_speed_estimate(const mavlink_message_t &msg)
 
 void GCS_MAVLINK::handle_command_ack(const mavlink_message_t &msg)
 {
-#if HAL_INS_ENABLED
+#if HAL_INS_ACCELCAL_ENABLED
+    mavlink_command_ack_t packet;
+    mavlink_msg_command_ack_decode(&msg, &packet);
+
     AP_AccelCal *accelcal = AP::ins().get_acal();
     if (accelcal != nullptr) {
-        accelcal->handleMessage(msg);
+        accelcal->handle_command_ack(packet);
     }
 #endif
 }
@@ -3959,7 +3987,7 @@ MAV_RESULT GCS_MAVLINK::_handle_command_preflight_calibration(const mavlink_comm
 
     rc().calibrating(is_positive(packet.param4));
 
-#if HAL_INS_ENABLED
+#if HAL_INS_ACCELCAL_ENABLED
     if (is_equal(packet.param5,1.0f)) {
         // start with gyro calibration
         if (!calibrate_gyros()) {
@@ -3970,7 +3998,9 @@ MAV_RESULT GCS_MAVLINK::_handle_command_preflight_calibration(const mavlink_comm
         AP::ins().get_acal()->start(this);
         return MAV_RESULT_ACCEPTED;
     }
+#endif
 
+#if HAL_INS_ENABLED
     if (is_equal(packet.param5,2.0f)) {
         if (!calibrate_gyros()) {
             return MAV_RESULT_FAILED;
@@ -4253,18 +4283,16 @@ MAV_RESULT GCS_MAVLINK::handle_command_do_sprayer(const mavlink_command_long_t &
 }
 #endif
 
+#if HAL_INS_ACCELCAL_ENABLED
 MAV_RESULT GCS_MAVLINK::handle_command_accelcal_vehicle_pos(const mavlink_command_long_t &packet)
 {
-#if HAL_INS_ENABLED
     if (AP::ins().get_acal() == nullptr ||
         !AP::ins().get_acal()->gcs_vehicle_position(packet.param1)) {
         return MAV_RESULT_FAILED;
     }
     return MAV_RESULT_ACCEPTED;
-#else
-    return MAV_RESULT_UNSUPPORTED;
-#endif
 }
+#endif  // HAL_INS_ACCELCAL_ENABLED
 
 MAV_RESULT GCS_MAVLINK::handle_command_mount(const mavlink_command_long_t &packet)
 {
@@ -4339,9 +4367,11 @@ MAV_RESULT GCS_MAVLINK::handle_command_long_packet(const mavlink_command_long_t 
 
     switch (packet.command) {
 
+#if HAL_INS_ACCELCAL_ENABLED
     case MAV_CMD_ACCELCAL_VEHICLE_POS:
         result = handle_command_accelcal_vehicle_pos(packet);
         break;
+#endif
 
     case MAV_CMD_DO_SET_MODE:
         result = handle_command_do_set_mode(packet);
@@ -4917,7 +4947,7 @@ void GCS_MAVLINK::send_sys_status()
         control_sensors_health,
         static_cast<uint16_t>(AP::scheduler().load_average() * 1000),
 #if !defined(HAL_BUILD_AP_PERIPH) || defined(HAL_PERIPH_ENABLE_BATTERY)
-        battery.voltage() * 1000,  // mV
+        battery.gcs_voltage() * 1000,  // mV
         battery_current,        // in 10mA units
         battery_remaining,      // in %
 #else
@@ -5007,17 +5037,6 @@ void GCS_MAVLINK::send_global_position_int()
         vel.y * 100,                     // Y speed cm/s (+ve East)
         vel.z * 100,                     // Z speed cm/s (+ve Down)
         ahrs.yaw_sensor);                // compass heading in 1/100 degree
-}
-
-void GCS_MAVLINK::send_gimbal_report() const
-{
-#if HAL_MOUNT_ENABLED
-    AP_Mount *mount = AP::mount();
-    if (mount == nullptr) {
-        return;
-    }
-    mount->send_gimbal_report(chan);
-#endif
 }
 
 void GCS_MAVLINK::send_mount_status() const
@@ -5168,11 +5187,6 @@ bool GCS_MAVLINK::try_send_message(const enum ap_message id)
     case MSG_NEXT_PARAM:
         CHECK_PAYLOAD_SIZE(PARAM_VALUE);
         queued_param_send();
-        break;
-
-    case MSG_GIMBAL_REPORT:
-        CHECK_PAYLOAD_SIZE(GIMBAL_REPORT);
-        send_gimbal_report();
         break;
 
     case MSG_HEARTBEAT:

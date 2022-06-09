@@ -710,9 +710,16 @@ def has_sdcard_spi():
 
 def get_ram_map():
     '''get RAM_MAP. May be different for bootloader'''
+    env_vars['APP_RAM_START'] = None
     if args.bootloader:
         ram_map = get_mcu_config('RAM_MAP_BOOTLOADER', False)
         if ram_map is not None:
+            app_ram_map = get_mcu_config('RAM_MAP', True)
+            if app_ram_map[0][0] != ram_map[0][0]:
+                # we need to find the location of app_ram_map[0] in ram_map
+                for i in range(len(ram_map)):
+                    if app_ram_map[0][0] == ram_map[i][0]:
+                        env_vars['APP_RAM_START'] = i
             return ram_map
     elif env_vars['EXT_FLASH_SIZE_MB']:
         ram_map = get_mcu_config('RAM_MAP_EXTERNAL_FLASH', False)
@@ -980,14 +987,21 @@ def write_mcu_config(f):
     cc_regions = []
     total_memory = 0
     for (address, size, flags) in ram_map:
-        regions.append('{(void*)0x%08x, 0x%08x, 0x%02x }' % (address, size*1024, flags))
         cc_regions.append('{0x%08x, 0x%08x, CRASH_CATCHER_BYTE }' % (address, address + size*1024))
+        if env_vars['APP_RAM_START'] is not None and address == ram_map[env_vars['APP_RAM_START']][0]:
+            ram_reserve_start = get_ram_reserve_start()
+            address += ram_reserve_start
+            size -= ram_reserve_start
+        regions.append('{(void*)0x%08x, 0x%08x, 0x%02x }' % (address, size*1024, flags))
         total_memory += size
     f.write('#define HAL_MEMORY_REGIONS %s\n' % ', '.join(regions))
     f.write('#define HAL_CC_MEMORY_REGIONS %s\n' % ', '.join(cc_regions))
     f.write('#define HAL_MEMORY_TOTAL_KB %u\n' % total_memory)
 
-    f.write('#define HAL_RAM0_START 0x%08x\n' % ram_map[0][0])
+    if env_vars['APP_RAM_START'] is not None:
+        f.write('#define HAL_RAM0_START 0x%08x\n' % ram_map[env_vars['APP_RAM_START']][0])
+    else:
+        f.write('#define HAL_RAM0_START 0x%08x\n' % ram_map[0][0])
     ram_reserve_start = get_ram_reserve_start()
     if ram_reserve_start > 0:
         f.write('#define HAL_RAM_RESERVE_START 0x%08x\n' % ram_reserve_start)
@@ -1197,11 +1211,12 @@ def write_ldscript(fname):
     f = open(fname, 'w')
     ram0_start = ram_map[0][0]
     ram0_len = ram_map[0][1] * 1024
-
-    # possibly reserve some memory for app/bootloader comms
-    ram_reserve_start = get_ram_reserve_start()
-    ram0_start += ram_reserve_start
-    ram0_len -= ram_reserve_start
+    if env_vars['APP_RAM_START'] is None:
+        # default to start of ram for shared ram
+        # possibly reserve some memory for app/bootloader comms
+        ram_reserve_start = get_ram_reserve_start()
+        ram0_start += ram_reserve_start
+        ram0_len -= ram_reserve_start
     if ext_flash_length == 0 or args.bootloader:
         env_vars['HAS_EXTERNAL_FLASH_SECTIONS'] = 0
         f.write('''/* generated ldscript.ld */
@@ -2757,6 +2772,71 @@ def add_apperiph_defaults(f):
 
 #ifndef AP_AIRSPEED_AUTOCAL_ENABLE
 #define AP_AIRSPEED_AUTOCAL_ENABLE 0
+#endif
+
+#ifndef AP_VOLZ_ENABLED
+#define AP_VOLZ_ENABLED 0
+#endif
+
+#ifndef AP_ROBOTISSERVO_ENABLED
+#define AP_ROBOTISSERVO_ENABLED 0
+#endif
+
+#ifndef AP_STATS_ENABLED
+#define AP_STATS_ENABLED 0
+#endif
+
+/*
+ * GPS Backends - we selectively turn backends on.
+ *   Note also that f103-GPS explicitly disables some of these backends.
+ */
+#define AP_GPS_BACKEND_DEFAULT_ENABLED 0
+
+#ifndef AP_GPS_ERB_ENABLED
+#define AP_GPS_ERB_ENABLED 0
+#endif
+
+#ifndef AP_GPS_GSOF_ENABLED
+#define AP_GPS_GSOF_ENABLED defined(HAL_PERIPH_ENABLE_GPS)
+#endif
+
+#ifndef AP_GPS_NMEA_ENABLED
+#define AP_GPS_NMEA_ENABLED 0
+#endif
+
+#ifndef AP_GPS_SBF_ENABLED
+#define AP_GPS_SBF_ENABLED defined(HAL_PERIPH_ENABLE_GPS)
+#endif
+
+#ifndef AP_GPS_SBP_ENABLED
+#define AP_GPS_SBP_ENABLED 0
+#endif
+
+#ifndef AP_GPS_SBP2_ENABLED
+#define AP_GPS_SBP2_ENABLED 0
+#endif
+
+#ifndef AP_GPS_SIRF_ENABLED
+#define AP_GPS_SIRF_ENABLED 0
+#endif
+
+#ifndef AP_GPS_MAV_ENABLED
+#define AP_GPS_MAV_ENABLED 0
+#endif
+
+#ifndef AP_GPS_NOVA_ENABLED
+#define AP_GPS_NOVA_ENABLED defined(HAL_PERIPH_ENABLE_GPS)
+#endif
+
+#ifndef HAL_SIM_GPS_ENABLED
+#define HAL_SIM_GPS_ENABLED (AP_SIM_ENABLED && defined(HAL_PERIPH_ENABLE_GPS))
+#endif
+
+/*
+ * Airspeed Backends - we selectively turn backends *off*
+ */
+#ifndef AP_AIRSPEED_ANALOG_ENABLED
+#define AP_AIRSPEED_ANALOG_ENABLED 0
 #endif
 
 ''')

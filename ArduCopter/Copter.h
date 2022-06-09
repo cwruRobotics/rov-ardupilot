@@ -391,17 +391,19 @@ private:
         uint8_t ekf                 : 1; // true if ekf failsafe has occurred
         uint8_t terrain             : 1; // true if the missing terrain data failsafe has occurred
         uint8_t adsb                : 1; // true if an adsb related failsafe has occurred
+        uint8_t deadreckon          : 1; // true if a dead reckoning failsafe has triggered
     } failsafe;
 
     bool any_failsafe_triggered() const {
-        return failsafe.radio || battery.has_failsafed() || failsafe.gcs || failsafe.ekf || failsafe.terrain || failsafe.adsb;
+        return failsafe.radio || battery.has_failsafed() || failsafe.gcs || failsafe.ekf || failsafe.terrain || failsafe.adsb || failsafe.deadreckon;
     }
 
-    // sensor health for logging
+    // dead reckoning state
     struct {
-        uint8_t baro        : 1;    // true if baro is healthy
-        uint8_t compass     : 1;    // true if compass is healthy
-    } sensor_health;
+        bool active;        // true if dead reckoning (position estimate using estimated airspeed, no position or velocity source)
+        bool timeout;       // true if dead reckoning has timedout and EKF's position and velocity estimate should no longer be trusted
+        uint32_t start_ms;  // system time that EKF began deadreckoning
+    } dead_reckoning;
 
     // Motor Output
     MOTOR_CLASS *motors;
@@ -640,7 +642,6 @@ private:
     void get_scheduler_tasks(const AP_Scheduler::Task *&tasks,
                              uint8_t &task_count,
                              uint32_t &log_bit) override;
-    void fast_loop() override;
 #if AP_SCRIPTING_ENABLED
     bool start_takeoff(float alt) override;
     bool set_target_location(const Location& target_loc) override;
@@ -655,6 +656,9 @@ private:
     bool nav_scripting_enable(uint8_t mode) override;
     bool nav_script_time(uint16_t &id, uint8_t &cmd, float &arg1, float &arg2) override;
     void nav_script_time_done(uint16_t id) override;
+    // lua scripts use this to retrieve EKF failsafe state
+    // returns true if the EKF failsafe has triggered
+    bool has_ekf_failsafed() const override;
 #endif // AP_SCRIPTING_ENABLED
     void rc_loop();
     void throttle_loop();
@@ -677,6 +681,7 @@ private:
     void set_accel_throttle_I_from_pilot_throttle();
     void rotate_body_frame_to_NE(float &x, float &y);
     uint16_t get_pilot_speed_dn() const;
+    void run_rate_controller() { attitude_control->rate_controller_run(); }
 
     // avoidance.cpp
     void low_alt_avoidance();
@@ -715,6 +720,7 @@ private:
     bool ekf_over_threshold();
     void failsafe_ekf_event();
     void failsafe_ekf_off_event(void);
+    void failsafe_ekf_recheck();
     void check_ekf_reset();
     void check_vibration();
 
@@ -737,12 +743,14 @@ private:
     void failsafe_terrain_set_status(bool data_ok);
     void failsafe_terrain_on_event();
     void gpsglitch_check();
+    void failsafe_deadreckon_check();
     void set_mode_RTL_or_land_with_pause(ModeReason reason);
     void set_mode_SmartRTL_or_RTL(ModeReason reason);
     void set_mode_SmartRTL_or_land_with_pause(ModeReason reason);
     void set_mode_auto_do_land_start_or_RTL(ModeReason reason);
     bool should_disarm_on_failsafe();
     void do_failsafe_action(FailsafeAction action, ModeReason reason);
+    void announce_failsafe(const char *type, const char *action_undertaken=nullptr);
 
     // failsafe.cpp
     void failsafe_enable();
@@ -797,7 +805,7 @@ private:
     void Log_Write_Data(LogDataID id, uint16_t value);
     void Log_Write_Data(LogDataID id, float value);
     void Log_Write_Parameter_Tuning(uint8_t param, float tuning_val, float tune_min, float tune_max);
-    void Log_Sensor_Health();
+    void Log_Video_Stabilisation();
 #if FRAME_CONFIG == HELI_FRAME
     void Log_Write_Heli(void);
 #endif
@@ -878,7 +886,6 @@ private:
     // system.cpp
     void init_ardupilot() override;
     void startup_INS_ground();
-    void update_dynamic_notch() override;
     bool position_ok() const;
     bool ekf_has_absolute_position() const;
     bool ekf_has_relative_position() const;

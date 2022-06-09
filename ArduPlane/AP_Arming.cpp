@@ -102,6 +102,11 @@ bool AP_Arming_Plane::pre_arm_checks(bool display_failure)
        }
     }
 
+    if (plane.mission.get_in_landing_sequence_flag()) {
+        check_failed(display_failure,"In landing sequence");
+        ret = false;
+    }
+    
     return ret;
 }
 
@@ -162,6 +167,10 @@ bool AP_Arming_Plane::quadplane_checks(bool display_failure)
         check_failed(ARMING_CHECK_PARAMETERS, display_failure, "Bad parameter: %s", failure_msg);
         ret = false;
     }
+    if (!plane.quadplane.motors->check_mot_pwm_params()) {
+        check_failed(ARMING_CHECK_PARAMETERS, display_failure, "Check Q_M_PWM_MIN/MAX");
+        ret = false;
+    }
 
     if ((plane.quadplane.options & QuadPlane::OPTION_ONLY_ARM_IN_QMODE_OR_AUTO) != 0) {
         if (!plane.control_mode->is_vtol_mode() && (plane.control_mode != &plane.mode_auto) && (plane.control_mode != &plane.mode_guided)) {
@@ -174,6 +183,16 @@ bool AP_Arming_Plane::quadplane_checks(bool display_failure)
         }
     }
 
+    if ((plane.control_mode == &plane.mode_auto) && !plane.mission.starts_with_takeoff_cmd()) {
+        check_failed(display_failure,"missing takeoff waypoint");
+        ret = false;
+    }
+
+    if (plane.control_mode == &plane.mode_rtl) {
+        check_failed(display_failure,"in RTL mode");
+        ret = false;
+    }
+    
     /*
       Q_ASSIST_SPEED really should be enabled for all quadplanes except tailsitters
      */
@@ -368,7 +387,7 @@ bool AP_Arming_Plane::mission_checks(bool report)
 {
     // base checks
     bool ret = AP_Arming::mission_checks(report);
-    if (plane.mission.get_landing_sequence_start() > 0 && plane.g.rtl_autoland.get() == 0) {
+    if (plane.mission.get_landing_sequence_start() > 0 && plane.g.rtl_autoland == RtlAutoland::RTL_DISABLE) {
         ret = false;
         check_failed(ARMING_CHECK_MISSION, report, "DO_LAND_START set and RTL_AUTOLAND disabled");
     }

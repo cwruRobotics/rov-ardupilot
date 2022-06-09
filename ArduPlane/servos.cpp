@@ -133,11 +133,17 @@ bool Plane::suppress_throttle(void)
         // if we have an airspeed sensor, then check it too, and
         // require 5m/s. This prevents throttle up due to spiky GPS
         // groundspeed with bad GPS reception
+#if AP_AIRSPEED_ENABLED
         if ((!ahrs.airspeed_sensor_enabled()) || airspeed.get_airspeed() >= 5) {
             // we're moving at more than 5 m/s
             throttle_suppressed = false;
             return false;        
         }
+#else
+        // no airspeed sensor, so we trust that the GPS's movement is truthful
+        throttle_suppressed = false;
+        return false;
+#endif
     }
 
 #if HAL_QUADPLANE_ENABLED
@@ -905,9 +911,9 @@ void Plane::set_servos(void)
         }
     }
 
-    uint8_t override_pct;
+    float override_pct = SRV_Channels::get_output_scaled(SRV_Channel::k_throttle);
     if (g2.ice_control.throttle_override(override_pct)) {
-        // the ICE controller wants to override the throttle for starting
+        // the ICE controller wants to override the throttle for starting, idle, or redline
         SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, override_pct);
     }
 
@@ -979,7 +985,7 @@ void Plane::servos_output(void)
 
     // support MANUAL_RCMASK
     if (g2.manual_rc_mask.get() != 0 && control_mode == &mode_manual) {
-        SRV_Channels::copy_radio_in_out_mask(uint16_t(g2.manual_rc_mask.get()));
+        SRV_Channels::copy_radio_in_out_mask(uint32_t(g2.manual_rc_mask.get()));
     }
 
     SRV_Channels::calc_pwm();

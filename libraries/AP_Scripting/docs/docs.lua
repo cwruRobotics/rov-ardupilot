@@ -680,12 +680,20 @@ local RC_Channel_ud = {}
 function RC_Channel_ud:norm_input_ignore_trim() end
 
 -- desc
+---@param PWM integer
+function RC_Channel_ud:set_override(PWM) end
+
+-- desc
 ---@return integer
 function RC_Channel_ud:get_aux_switch_pos() end
 
--- desc
+-- desc return input on a channel from -1 to 1, centered on the trim. Ignores the deadzone
 ---@return number
 function RC_Channel_ud:norm_input() end
+
+-- desc return input on a channel from -1 to 1, centered on the trim. Returns zero when within deadzone of the trim
+---@return number
+function RC_Channel_ud:norm_input_dz() end
 
 
 -- desc
@@ -738,6 +746,9 @@ function periph:get_vehicle_state() end
 ---@return number
 function periph:get_yaw_earth() end
 
+-- desc
+---@param text string
+function periph:can_printf(text) end
 
 -- desc
 ---@class ins
@@ -1105,10 +1116,12 @@ function baro:get_pressure() end
 ---@class serial
 serial = {}
 
--- desc
----@param protocol integer
----@return AP_HAL__UARTDriver_ud
-function serial:find_serial(protocol) end
+-- Returns the UART instance that allows connections from scripts (those with SERIALx_PROTOCOL = 28`).
+-- For instance = 0, returns first such UART, second for instance = 1, and so on.
+-- If such an instance is not found, returns nil.
+---@param instance integer -- the 0-based index of the UART instance to return.
+---@return AP_HAL__UARTDriver_ud -- the requested UART instance available for scripting, or nil if none.
+function serial:find_serial(instance) end
 
 
 -- desc
@@ -1500,8 +1513,9 @@ function terrain:height_terrain_difference_home(extrapolate) end
 
 -- desc
 ---@param loc Location_ud
+---@param corrected boolean
 ---@return number|nil
-function terrain:height_amsl(loc) end
+function terrain:height_amsl(loc, corrected) end
 
 -- desc
 ---@return integer
@@ -1822,6 +1836,10 @@ function arming:is_armed() end
 
 -- desc
 ---@return boolean
+function arming:pre_arm_checks() end
+
+-- desc
+---@return boolean
 function arming:disarm() end
 
 
@@ -1946,6 +1964,16 @@ function ahrs:get_pitch() end
 -- desc
 ---@return number
 function ahrs:get_roll() end
+
+-- desc
+---@class AC_AttitudeControl
+AC_AttitudeControl = {}
+
+-- return slew rates for VTOL controller
+---@return number -- roll slew rate
+---@return number -- pitch slew rate
+---@return number -- yaw slew rate
+function AC_AttitudeControl:get_rpy_srate() end
 
 -- desc
 ---@class follow

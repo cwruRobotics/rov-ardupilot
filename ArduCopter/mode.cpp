@@ -397,38 +397,23 @@ void Copter::notify_flight_mode() {
 
 // get_pilot_desired_angle - transform pilot's roll or pitch input into a desired lean angle
 // returns desired angle in centi-degrees
-void Mode::get_pilot_desired_lean_angles(float &roll_out, float &pitch_out, float angle_max, float angle_limit) const
+void Mode::get_pilot_desired_lean_angles(float &roll_out_cd, float &pitch_out_cd, float angle_max_cd, float angle_limit_cd) const
 {
     // throttle failsafe check
     if (copter.failsafe.radio || !copter.ap.rc_receiver_present) {
-        roll_out = 0;
-        pitch_out = 0;
+        roll_out_cd = 0.0;
+        pitch_out_cd = 0.0;
         return;
     }
-    // fetch roll and pitch inputs
-    roll_out = channel_roll->get_control_in();
-    pitch_out = channel_pitch->get_control_in();
 
-    // limit max lean angle
-    angle_limit = constrain_float(angle_limit, 1000.0f, angle_max);
+    //transform pilot's normalised roll or pitch stick input into a roll and pitch euler angle command
+    float roll_out_deg;
+    float pitch_out_deg;
+    rc_input_to_roll_pitch(channel_roll->get_control_in()*(1.0/ROLL_PITCH_YAW_INPUT_MAX), channel_pitch->get_control_in()*(1.0/ROLL_PITCH_YAW_INPUT_MAX), angle_max_cd * 0.01,  angle_limit_cd * 0.01, roll_out_deg, pitch_out_deg);
 
-    // scale roll and pitch inputs to ANGLE_MAX parameter range
-    float scaler = angle_max/(float)ROLL_PITCH_YAW_INPUT_MAX;
-    roll_out *= scaler;
-    pitch_out *= scaler;
-
-    // do circular limit
-    float total_in = norm(pitch_out, roll_out);
-    if (total_in > angle_limit) {
-        float ratio = angle_limit / total_in;
-        roll_out *= ratio;
-        pitch_out *= ratio;
-    }
-
-    // do lateral tilt to euler roll conversion
-    roll_out = (18000/M_PI) * atanf(cosf(pitch_out*(M_PI/18000))*tanf(roll_out*(M_PI/18000)));
-
-    // roll_out and pitch_out are returned
+    // Convert to centi-degrees
+    roll_out_cd = roll_out_deg * 100.0;
+    pitch_out_cd = pitch_out_deg * 100.0;
 }
 
 // transform pilot's roll or pitch input into a desired velocity
@@ -541,6 +526,8 @@ void Mode::make_safe_ground_handling(bool force_throttle_unlimited)
         break;
     }
 
+    pos_control->relax_velocity_controller_xy();
+    pos_control->update_xy_controller();
     pos_control->relax_z_controller(0.0f);   // forces throttle output to decay to zero
     pos_control->update_z_controller();
     // we may need to move this out
@@ -759,6 +746,7 @@ void Mode::land_run_normal_or_precland(bool pause_descent)
 // The passed in location is expected to be NED and in m
 void Mode::precland_retry_position(const Vector3f &retry_pos)
 {
+    float target_yaw_rate = 0;
     if (!copter.failsafe.radio) {
         if ((g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 && copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
             AP::logger().Write_Event(LogEvent::LAND_CANCELLED_BY_PILOT);
@@ -785,6 +773,11 @@ void Mode::precland_retry_position(const Vector3f &retry_pos)
                 copter.ap.land_repo_active = true;
             }
         }
+
+        target_yaw_rate = get_pilot_desired_yaw_rate(channel_yaw->norm_input_dz());
+        if (!is_zero(target_yaw_rate)) {
+            auto_yaw.set_mode(AUTO_YAW_HOLD);
+        }
     }
 
     Vector3p retry_pos_NEU{retry_pos.x, retry_pos.y, retry_pos.z * -1.0f};
@@ -798,8 +791,14 @@ void Mode::precland_retry_position(const Vector3f &retry_pos)
 
     const Vector3f thrust_vector{pos_control->get_thrust_vector()};
 
-    // roll, pitch from position controller, yaw heading from auto_heading()
-    attitude_control->input_thrust_vector_heading(thrust_vector, auto_yaw.yaw());
+    // call attitude controller
+    if (auto_yaw.mode() == AUTO_YAW_HOLD) {
+        // roll & pitch from waypoint controller, yaw rate from pilot
+        attitude_control->input_thrust_vector_rate_heading(thrust_vector, target_yaw_rate);
+    } else {
+        // roll, pitch from waypoint controller, yaw heading from auto_heading()
+        attitude_control->input_thrust_vector_heading(thrust_vector, auto_yaw.yaw());
+    }
 }
 
 // Run precland statemachine. This function should be called from any mode that wants to do precision landing.
